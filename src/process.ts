@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type {
   ProcessResult,
   TerminationReason,
@@ -120,9 +121,7 @@ function terminate(
 export async function runObservedProcess(
   options: ObservedProcessOptions,
 ): Promise<ProcessResult> {
-  await mkdir(new URL(".", `file://${options.stdoutPath}`).pathname, {
-    recursive: true,
-  });
+  await mkdir(dirname(options.stdoutPath), { recursive: true });
 
   let process: Bun.ReadableSubprocess;
   try {

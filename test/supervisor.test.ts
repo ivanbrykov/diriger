@@ -107,4 +107,25 @@ describe("runObservedProcess", () => {
     expect(result.terminationReason).toBe("timeout");
     expect(result.exitCode).not.toBe(0);
   });
+
+  test("terminates sustained output without tool progress", async () => {
+    const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
+    const result = await runObservedProcess({
+      command: [
+        "bash",
+        "-lc",
+        "printf '%01000d' 0; sleep 5",
+      ],
+      cwd: "/tmp",
+      env: process.env,
+      stdoutPath: `${root}/stdout.jsonl`,
+      stderrPath: `${root}/stderr.log`,
+      timeoutMs: 5_000,
+      noToolTimeoutMs: 10,
+      noToolOutputBytes: 100,
+    });
+
+    expect(result.terminationReason).toBe("no-tool-progress");
+    expect(result.exitCode).not.toBe(0);
+  });
 });
