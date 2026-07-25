@@ -1,0 +1,19 @@
+{
+  "name": "goose-supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "goose-supervisor": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.9.3"
+  }
+}
+

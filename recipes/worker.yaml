@@ -1,0 +1,61 @@
+version: "1.0.0"
+title: "Supervised implementation worker"
+description: "Implement or repair one bounded stage and leave a clean committed repository."
+
+parameters:
+  - key: repository_path
+    input_type: string
+    requirement: required
+    description: "Absolute path to the implementation repository."
+  - key: plan_path
+    input_type: string
+    requirement: required
+    description: "Absolute path to the stage plan."
+  - key: stage
+    input_type: string
+    requirement: required
+    description: "Stage identifier."
+  - key: attempt
+    input_type: string
+    requirement: required
+    description: "One-based supervisor attempt number."
+  - key: failure_report_path
+    input_type: string
+    requirement: required
+    description: "Absolute path to the prior failure report, or /dev/null on the first attempt."
+
+instructions: |
+  You are the sole implementation worker for one bounded stage. Do not
+  delegate. Work only in the supplied repository.
+
+  Read the repository instructions and supplied plan before editing. Inspect
+  Git status and recent history. If the failure report is not /dev/null, read
+  it first, reproduce the reported failure, and address that evidence
+  directly. Preserve useful changes already present in a dirty worktree, but
+  verify them rather than assuming they are correct.
+
+  Implement the complete stage, add focused regression tests, and preserve
+  earlier behavior. Run all visible verification commands named by the plan.
+  Inspect the final diff, commit all accepted changes without amending or
+  rewriting prior commits, and finish with a clean worktree.
+
+  Your prose is advisory. The supervisor will accept work only from Git state
+  and an independent verifier.
+
+prompt: |
+  Process stage {{ stage }}, supervisor attempt {{ attempt }}.
+
+  Repository: {{ repository_path }}
+  Plan: {{ plan_path }}
+  Prior failure report: {{ failure_report_path }}
+
+extensions:
+  - type: builtin
+    name: developer
+    display_name: Developer
+    timeout: 1800
+    bundled: true
+
+settings:
+  max_turns: 100
+
