@@ -1,6 +1,6 @@
-# Goose Supervisor
+# Diriger
 
-Goose Supervisor is a deterministic, single-stage controller for bounded coding
+Diriger is a deterministic, single-stage controller for bounded coding
 work. It runs one fresh legacy Goose or ACP worker at a time against a
 caller-provided Git worktree, accepts work only through Git invariants and an
 independent verifier, and records durable evidence outside that worktree.
@@ -9,13 +9,20 @@ It does not interpret model prose as success, run a daemon, manage a model
 lifecycle, create a worktree, or sandbox tools. Supply a prepared local Git
 worktree and a **new** external evidence directory for each run.
 
+## CLI
+
+The installed command is `diriger`. From a source checkout, use
+`bun src/cli.ts` in its place. `goose-supervisor` remains a compatibility alias.
+Existing evidence and internal ownership lock names remain compatible with
+earlier releases. Goose-specific options still configure the Goose adapter.
+
 ## Run a stage
 
 The evidence path must not already exist. It receives the frozen inputs,
 state transitions, attempt artifacts, and final summary.
 
 ```bash
-bun src/cli.ts run \
+diriger run \
   --repo /absolute/path/to/repository \
   --plan /absolute/path/to/plan.md \
   --stage 1 \
@@ -32,7 +39,7 @@ the first attempt receives `/dev/null`.
 Use ACP with an explicit stdio argv array:
 
 ```bash
-bun src/cli.ts run \
+diriger run \
   --repo /absolute/path/to/repository \
   --plan /absolute/path/to/plan.md \
   --stage 1 \
@@ -64,7 +71,7 @@ snapshot root contains the verifier entry and every dependency.
 ```
 
 ```bash
-bun src/cli.ts run ... \
+diriger run ... \
   --verifier /absolute/path/to/verification/verify-stage.sh \
   --verifier-manifest /absolute/path/to/config/verifier-manifest.json
 ```
@@ -101,16 +108,16 @@ repair.
 Use the evidence directory to inspect recovery state without starting a worker:
 
 ```bash
-bun src/cli.ts status --evidence /absolute/path/to/evidence --json
-bun src/cli.ts recover --evidence /absolute/path/to/evidence --json
+diriger status --evidence /absolute/path/to/evidence --json
+diriger recover --evidence /absolute/path/to/evidence --json
 ```
 
 `recover` without `--apply` is a preview. If a controller crashed, use the
 explicit reclamation step only after reviewing the preview:
 
 ```bash
-bun src/cli.ts recover --evidence /absolute/path/to/evidence --apply
-bun src/cli.ts resume --evidence /absolute/path/to/evidence --json
+diriger recover --evidence /absolute/path/to/evidence --apply
+diriger resume --evidence /absolute/path/to/evidence --json
 ```
 
 `resume` reuses an accepted exact-head proof without rerunning a worker or

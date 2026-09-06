@@ -149,6 +149,7 @@ export async function resolveWorktreeIdentity(
   return {
     worktree: value.root,
     gitDir: value.gitDir,
+    // Retain the shared lock namespace so pre-rename releases cannot run concurrently.
     lockPath: join(value.gitDir, "goose-supervisor-ownership.lock"),
   };
 }

@@ -116,7 +116,7 @@ describe("boundedFailureOutput", () => {
 
 describe("runObservedProcess", () => {
   test("captures a nonzero process exit", async () => {
-    const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
+    const root = `/tmp/diriger-test-${crypto.randomUUID()}`;
     const result = await runObservedProcess({
       command: [
         "bash",
@@ -138,7 +138,7 @@ describe("runObservedProcess", () => {
   });
 
   test("terminates a process at its wall timeout", async () => {
-    const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
+    const root = `/tmp/diriger-test-${crypto.randomUUID()}`;
     const result = await runObservedProcess({
       command: ["bash", "-lc", "sleep 5"],
       cwd: "/tmp",
@@ -155,7 +155,7 @@ describe("runObservedProcess", () => {
   });
 
   test("terminates sustained output without tool progress", async () => {
-    const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
+    const root = `/tmp/diriger-test-${crypto.randomUUID()}`;
     const result = await runObservedProcess({
       command: ["bash", "-lc", "printf '%01000d' 0; sleep 5"],
       cwd: "/tmp",

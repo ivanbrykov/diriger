@@ -9,10 +9,10 @@ import type { SupervisorConfig } from "./types.js";
 
 const USAGE = [
   "Usage:",
-  "  goose-supervisor run --repo PATH --plan PATH --stage ID --verifier PATH --evidence PATH",
-  "  goose-supervisor status --evidence PATH [--json]",
-  "  goose-supervisor recover --evidence PATH [--apply] [--json]",
-  "  goose-supervisor resume --evidence PATH [--json]",
+  "  diriger run --repo PATH --plan PATH --stage ID --verifier PATH --evidence PATH",
+  "  diriger status --evidence PATH [--json]",
+  "  diriger recover --evidence PATH [--apply] [--json]",
+  "  diriger resume --evidence PATH [--json]",
   "",
   "Status exits: 0 ready/accepted/preview; 1 terminal; 2 invalid input/state; 3 active/blocked",
   "",
@@ -204,7 +204,7 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
     noToolTimeoutMs:
       positiveInteger(values, "no-tool-timeout-seconds", 90) * 1_000,
     noToolOutputBytes: positiveInteger(values, "no-tool-output-bytes", 262_144),
-    runId: values.get("run-id") ?? "goose-supervisor-" + timestamp,
+    runId: values.get("run-id") ?? "diriger-" + timestamp,
   };
 }
 

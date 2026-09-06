@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "goose-supervisor",
+      "name": "diriger",
       "devDependencies": {
         "@types/bun": "^1.3.4",
         "typescript": "^5.9.3",

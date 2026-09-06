@@ -1,9 +1,10 @@
 {
-  "name": "goose-supervisor",
+  "name": "diriger",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
+    "diriger": "./src/cli.ts",
     "goose-supervisor": "./src/cli.ts"
   },
   "scripts": {
@@ -16,4 +17,3 @@
     "typescript": "^5.9.3"
   }
 }
-

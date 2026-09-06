@@ -33,7 +33,7 @@ function git(repository: string, args: ReadonlyArray<string>): void {
 }
 
 async function fixture(): Promise<SupervisorConfig> {
-  const root = await mkdtemp(join(tmpdir(), "goose-supervisor-e2e-"));
+  const root = await mkdtemp(join(tmpdir(), "diriger-e2e-"));
   roots.push(root);
 
   const repository = join(root, "repo");
