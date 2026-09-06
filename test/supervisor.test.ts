@@ -31,6 +31,50 @@ describe("parseConfig", () => {
     expect(config.workerTimeoutMs).toBe(1_800_000);
   });
 
+  test("parses ACP JSON argv without requiring a legacy recipe", () => {
+    const config = parseConfig([
+      "run",
+      "--repo",
+      "/tmp/repo",
+      "--plan",
+      "/tmp/plan.md",
+      "--stage",
+      "1",
+      "--verifier",
+      "/tmp/verify",
+      "--evidence",
+      "/tmp/evidence",
+      "--worker-kind",
+      "acp",
+      "--acp-command",
+      '["agent","--stdio"]',
+    ]);
+    expect(config.acpCommand).toEqual(["agent", "--stdio"]);
+    expect(config.workerRecipePath).toBeUndefined();
+  });
+
+  test("rejects invalid ACP argv", () => {
+    expect(() =>
+      parseConfig([
+        "run",
+        "--repo",
+        "/tmp/repo",
+        "--plan",
+        "/tmp/plan.md",
+        "--stage",
+        "1",
+        "--verifier",
+        "/tmp/verify",
+        "--evidence",
+        "/tmp/evidence",
+        "--worker-kind",
+        "acp",
+        "--acp-command",
+        '["agent",""]',
+      ]),
+    ).toThrow("JSON array of nonempty argv strings");
+  });
+
   test("rejects a non-positive attempt limit", () => {
     expect(() =>
       parseConfig([
@@ -56,9 +100,7 @@ describe("parseConfig", () => {
 
 describe("boundedFailureOutput", () => {
   test("preserves short verifier output", () => {
-    expect(boundedFailureOutput("failed assertion")).toBe(
-      "failed assertion",
-    );
+    expect(boundedFailureOutput("failed assertion")).toBe("failed assertion");
   });
 
   test("keeps both ends of large verifier output", () => {
@@ -76,7 +118,11 @@ describe("runObservedProcess", () => {
   test("captures a nonzero process exit", async () => {
     const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
     const result = await runObservedProcess({
-      command: ["bash", "-lc", "printf '{\"type\":\"complete\",\"total_tokens\":7}\\n'; exit 7"],
+      command: [
+        "bash",
+        "-lc",
+        'printf \'{"type":"complete","total_tokens":7}\\n\'; exit 7',
+      ],
       cwd: "/tmp",
       env: process.env,
       stdoutPath: `${root}/stdout.jsonl`,
@@ -111,11 +157,7 @@ describe("runObservedProcess", () => {
   test("terminates sustained output without tool progress", async () => {
     const root = `/tmp/goose-supervisor-test-${crypto.randomUUID()}`;
     const result = await runObservedProcess({
-      command: [
-        "bash",
-        "-lc",
-        "printf '%01000d' 0; sleep 5",
-      ],
+      command: ["bash", "-lc", "printf '%01000d' 0; sleep 5"],
       cwd: "/tmp",
       env: process.env,
       stdoutPath: `${root}/stdout.jsonl`,
