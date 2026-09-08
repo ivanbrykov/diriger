@@ -35,6 +35,13 @@ export interface AttemptProtocol {
   processExitUnavailable?: boolean;
   wrapperExitCode?: number;
   cleanupComplete: boolean;
+  /** Present only when the ACP tool-free generation watchdog fired. */
+  watchdog?: {
+    readonly toolProgressAgeMs: number;
+    readonly meaningfulActivityAgeMs: number;
+    readonly toolFreeTextBytes: number;
+    readonly toolFreeWireBytes: number;
+  };
 }
 export interface AttemptExecution {
   worker: ProcessResult;
@@ -146,22 +153,39 @@ function request(value: unknown): Request | undefined {
     ? (value as Request)
     : undefined;
 }
-function isToolUpdate(message: Request): boolean {
+function updateKind(update: Record<string, unknown>): string | undefined {
+  const kind = update.sessionUpdate;
+  return typeof kind === "string"
+    ? kind
+    : object(kind) && typeof kind.type === "string"
+      ? kind.type
+      : undefined;
+}
+
+function activeUpdate(
+  message: Request,
+  sessionId: string | undefined,
+): Record<string, unknown> | undefined {
   if (
     message.method !== "session/update" ||
     !object((message as unknown as { params?: unknown }).params)
   )
-    return false;
-  const update = (message as unknown as { params: Record<string, unknown> })
-    .params.update;
-  if (!object(update)) return false;
-  const kind = update.sessionUpdate;
-  return (
-    kind === "tool_call" ||
-    kind === "tool_call_update" ||
-    (object(kind) &&
-      (kind.type === "tool_call" || kind.type === "tool_call_update"))
-  );
+    return undefined;
+  const params = (message as unknown as { params: Record<string, unknown> })
+    .params;
+  return params.sessionId === sessionId && object(params.update)
+    ? params.update
+    : undefined;
+}
+
+function textBytes(update: Record<string, unknown>): number {
+  const kind = updateKind(update);
+  if (kind !== "agent_thought_chunk" && kind !== "agent_message_chunk")
+    return 0;
+  const content = update.content;
+  if (!object(content) || content.type !== "text" || typeof content.text !== "string")
+    return 0;
+  return new TextEncoder().encode(content.text).byteLength;
 }
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
@@ -222,9 +246,12 @@ export class AcpAttemptExecutor implements AttemptExecutor {
     let failure: string | undefined,
       reason: TerminationReason | undefined,
       cleanupPromise: Promise<void> | undefined;
-    let lastProgressAt = Date.now(),
-      bytesSinceProgress = 0,
+    let lastToolAt = Date.now(),
+      lastMeaningfulActivityAt = Date.now(),
+      toolFreeTextBytes = 0,
+      toolFreeWireBytes = 0,
       promptInFlight = false;
+    let watchdogSnapshot: AttemptProtocol["watchdog"] | undefined;
     const lifecycle = async (state: AttemptLifecycle) => {
       await onLifecycle?.(state);
     };
@@ -340,9 +367,21 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         if (incoming === undefined)
           throw new Error("invalid ACP JSON-RPC message");
         if (incoming.id === undefined) {
-          if (isToolUpdate(incoming)) {
-            lastProgressAt = Date.now();
-            bytesSinceProgress = 0;
+          if (!promptInFlight || sessionId === undefined) return;
+          const update = activeUpdate(incoming, sessionId);
+          if (update === undefined) return;
+          const kind = updateKind(update);
+          if (kind === "tool_call" || kind === "tool_call_update") {
+            lastToolAt = Date.now();
+            lastMeaningfulActivityAt = lastToolAt;
+            toolFreeTextBytes = 0;
+            toolFreeWireBytes = 0;
+            return;
+          }
+          const bytes = textBytes(update);
+          if (bytes > 0) {
+            lastMeaningfulActivityAt = Date.now();
+            toolFreeTextBytes += bytes;
           }
           return;
         }
@@ -366,7 +405,6 @@ export class AcpAttemptExecutor implements AttemptExecutor {
           const value = await reader.read();
           if (value.done) break;
           bytes += value.value.byteLength;
-          bytesSinceProgress += value.value.byteLength;
           if (bytes > MAX_STREAM_BYTES)
             throw new Error(
               "ACP stdout exceeds " + MAX_STREAM_BYTES + " bytes",
@@ -390,6 +428,8 @@ export class AcpAttemptExecutor implements AttemptExecutor {
             } catch {
               throw new Error("malformed ACP JSON-RPC frame");
             }
+            if (promptInFlight)
+              toolFreeWireBytes += encoder.encode(line).byteLength + 1;
             handle(message);
           }
           if (encoder.encode(pending).byteLength > MAX_FRAME_BYTES)
@@ -424,16 +464,28 @@ export class AcpAttemptExecutor implements AttemptExecutor {
     const watchdog = setInterval(() => {
       if (
         promptInFlight &&
-        Date.now() - lastProgressAt >= config.noToolTimeoutMs &&
-        bytesSinceProgress >= config.noToolOutputBytes
+        Date.now() - lastToolAt >= config.noToolTimeoutMs &&
+        toolFreeTextBytes >= config.noToolOutputBytes
       ) {
+        watchdogSnapshot ??= {
+          toolProgressAgeMs: Math.min(
+            Date.now() - lastToolAt,
+            config.workerTimeoutMs,
+          ),
+          meaningfulActivityAgeMs: Math.min(
+            Date.now() - lastMeaningfulActivityAt,
+            config.workerTimeoutMs,
+          ),
+          toolFreeTextBytes,
+          toolFreeWireBytes,
+        };
         fail(
-          "ACP output advanced without session progress",
+          "ACP tool-free generated text budget exceeded",
           "no-tool-progress",
         );
         void cleanup("no-tool-progress").catch(() => {});
       }
-    }, 1_000);
+    }, Math.min(1_000, Math.max(25, Math.floor(config.noToolTimeoutMs / 4))));
     try {
       const initialize = await call("initialize", {
         protocolVersion: 1,
@@ -464,8 +516,10 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         "Failure report: " + failureReportPath,
       ].join("\n");
       await lifecycle("prompt_in_flight");
-      lastProgressAt = Date.now();
-      bytesSinceProgress = 0;
+      lastToolAt = Date.now();
+      lastMeaningfulActivityAt = lastToolAt;
+      toolFreeTextBytes = 0;
+      toolFreeWireBytes = 0;
       promptInFlight = true;
       const prompt = await call("session/prompt", {
         sessionId,
@@ -533,6 +587,7 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         ...(stopReason === undefined ? {} : { stopReason }),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(failure === undefined ? {} : { error: failure }),
+        ...(watchdogSnapshot === undefined ? {} : { watchdog: watchdogSnapshot }),
       },
     };
   }

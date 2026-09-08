@@ -77,6 +77,13 @@ export interface AttemptRecord {
     /** Wrapper exit when processExitCode is unavailable. */
     readonly wrapperExitCode?: number;
     readonly cleanupComplete: boolean;
+    /** Present only when ACP ended for excessive tool-free generated text. */
+    readonly watchdog?: {
+      readonly toolProgressAgeMs: number;
+      readonly meaningfulActivityAgeMs: number;
+      readonly toolFreeTextBytes: number;
+      readonly toolFreeWireBytes: number;
+    };
   };
   readonly verification?: VerificationResult;
   readonly failureReportPath?: string;

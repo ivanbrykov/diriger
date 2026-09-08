@@ -159,8 +159,21 @@ multi-stage scheduler or a persistent agent/model service.
 
 ## Resource limits
 
-Worker wall time and the no-tool output-growth watchdog are configurable. Legacy
-worker logs are capped at 64 MiB per stream and incomplete lines at 1 MiB; an
+Worker wall time and the tool-free generation watchdog are configurable. The
+watchdog requires **both** `--no-tool-timeout-seconds` since the last tool event
+and `--no-tool-output-bytes` generated since that event. For ACP, the byte budget
+counts decoded UTF-8 text in thought/message chunks, excluding JSON framing,
+metadata, and tool output. Splitting the same text into many token-sized frames
+does not consume extra budget. Legacy Goose retains its raw stdout byte budget.
+
+This is a generation budget, not a silence timeout: meaningful thought/message
+activity is tracked separately from tool progress for diagnostics. It does not
+reset the tool-free text budget indefinitely. Silent tools and model prefill
+remain bounded by the hard worker wall timeout; no short inactivity cutoff is
+introduced. ACP generation-budget failures include a bounded watchdog snapshot to explain
+the generated-text count, wire bytes, and elapsed activity/tool times.
+
+Legacy worker logs are capped at 64 MiB per stream and incomplete lines at 1 MiB; an
 overflow terminates the owned group. Verifier streams are capped at 8 MiB each;
 an overflow is drained, recorded as a verifier failure, and only bounded output
 is retained. The verifier wall-time limit is ten minutes. Failure reports keep

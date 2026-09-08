@@ -23,8 +23,8 @@ const USAGE = [
   "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array",
   "  --max-attempts N                Fresh worker attempts (default: 2)",
   "  --worker-timeout-seconds N      Per-worker wall timeout (default: 1800)",
-  "  --no-tool-timeout-seconds N     Time before output-growth watchdog (default: 90)",
-  "  --no-tool-output-bytes N        Output since tool threshold (default: 262144)",
+  "  --no-tool-timeout-seconds N     Tool-free time gate for generation budget (default: 90)",
+  "  --no-tool-output-bytes N        ACP text / legacy stdout bytes since tool (default: 262144)",
   "  --run-id ID                     Evidence/session prefix (default: timestamp)",
   "  --verifier-manifest PATH        JSON verifier dependency closure",
 ].join("\n");

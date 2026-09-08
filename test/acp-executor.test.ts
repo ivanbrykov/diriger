@@ -12,7 +12,12 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
-async function run(body: string, timeout = 200, lifecycle: string[] = []) {
+async function run(
+  body: string,
+  timeout = 200,
+  lifecycle: string[] = [],
+  watchdog = { timeoutMs: 200, textBytes: 256 },
+) {
   const root = await mkdtemp(join(tmpdir(), "acp-"));
   roots.push(root);
   const agent = join(root, "agent");
@@ -29,8 +34,8 @@ async function run(body: string, timeout = 200, lifecycle: string[] = []) {
       gooseBin: "goose",
       acpCommand: [agent],
       workerTimeoutMs: timeout,
-      noToolTimeoutMs: 1,
-      noToolOutputBytes: 1,
+      noToolTimeoutMs: watchdog.timeoutMs,
+      noToolOutputBytes: watchdog.textBytes,
       maxAttempts: 1,
       runId: "t",
     },
@@ -138,22 +143,38 @@ const sessionFrame = JSON.stringify({
   id: 2,
   result: { sessionId: "s" },
 });
-const textUpdateFrame = JSON.stringify({
-  jsonrpc: "2.0",
-  method: "session/update",
-  params: { update: { sessionUpdate: "agent_message_chunk" } },
+function updateFrame(
+  sessionUpdate: string,
+  content?: { type: string; text?: string },
+  sessionId = "s",
+): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId,
+      update: {
+        sessionUpdate,
+        ...(content === undefined ? {} : { content }),
+      },
+    },
+  });
+}
+const textUpdateFrame = updateFrame("agent_message_chunk", {
+  type: "text",
+  text: "semantic text",
 });
 const toolUpdateFrame = JSON.stringify({
   jsonrpc: "2.0",
   method: "session/update",
-  params: { update: { sessionUpdate: "tool_call_update" } },
+  params: { sessionId: "s", update: { sessionUpdate: "tool_call_update" } },
 });
 const endTurnFrame = JSON.stringify({
   jsonrpc: "2.0",
   id: 3,
   result: { stopReason: "end_turn" },
 });
-test("text-only ACP updates do not reset the no-tool watchdog", async () => {
+test("tool-free semantic text eventually terminates without resetting its budget", async () => {
   const body =
     "read a; echo '" +
     initFrame +
@@ -161,11 +182,15 @@ test("text-only ACP updates do not reset the no-tool watchdog", async () => {
     sessionFrame +
     "'; read c; while true; do echo '" +
     textUpdateFrame +
-    "'; sleep 0.1; done";
-  expect((await run(body, 5_000)).worker.terminationReason).toBe(
-    "no-tool-progress",
+    "'; sleep 0.05; done";
+  const r = await run(body, 2_000);
+  expect(r.worker.terminationReason).toBe("no-tool-progress");
+  expect(r.protocol?.error).toContain("tool-free generated text budget");
+  expect(r.protocol?.watchdog?.toolFreeTextBytes).toBeGreaterThan(1);
+  expect(r.protocol?.watchdog?.toolFreeWireBytes).toBeGreaterThan(
+    r.protocol?.watchdog?.toolFreeTextBytes ?? 0,
   );
-}, 10_000);
+}, 5_000);
 test("tool-call updates keep the prompt alive until end_turn", async () => {
   const body =
     "read a; echo '" +
@@ -181,6 +206,66 @@ test("tool-call updates keep the prompt alive until end_turn", async () => {
   expect(r.worker.terminationReason).toBeUndefined();
   expect(r.worker.exitCode).toBe(0);
 }, 10_000);
+
+test("fragmented thought frames use decoded text bytes instead of wire framing", async () => {
+  const thought = updateFrame("agent_thought_chunk", { type: "text", text: "x" });
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `for i in $(seq 1 4000); do echo '${thought}'; done; ` +
+    `sleep 1.2; ` +
+    `echo '${endTurnFrame}'; sleep 5`;
+  const r = await run(body, 5_000, [], {
+    timeoutMs: 200,
+    textBytes: 256 * 1024,
+  });
+  expect(r.worker.terminationReason).toBeUndefined();
+  expect(r.worker.exitCode).toBe(0);
+}, 10_000);
+
+test("coarse and fragmented Unicode text have the same semantic budget", async () => {
+  const runText = async (text: string, count = 1) => {
+    const frame = updateFrame("agent_thought_chunk", { type: "text", text });
+    const body =
+      `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+      `for i in $(seq 1 ${count}); do echo '${frame}'; done; sleep 5`;
+    return run(body, 2_000);
+  };
+  const coarse = await runText("é".repeat(2000));
+  const fine = await runText("é", 2000);
+  expect(coarse.worker.terminationReason).toBe("no-tool-progress");
+  expect(fine.worker.terminationReason).toBe("no-tool-progress");
+  expect(coarse.protocol?.watchdog?.toolFreeTextBytes).toBe(4000);
+  expect(fine.protocol?.watchdog?.toolFreeTextBytes).toBe(4000);
+}, 10_000);
+
+test("only active-session text counts and a valid tool update resets the budget", async () => {
+  const text = updateFrame("agent_thought_chunk", { type: "text", text: "x".repeat(4) });
+  const ignored = updateFrame(
+    "agent_thought_chunk",
+    { type: "text", text: "x".repeat(1000) },
+    "other",
+  );
+  const metadata = updateFrame("session_info", {
+    type: "text",
+    text: "x".repeat(1000),
+  });
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${ignored}'; echo '${metadata}'; echo '${text}'; echo '${toolUpdateFrame}'; ` +
+    `echo '${text}'; sleep 5`;
+  const r = await run(body, 2_000, [], { timeoutMs: 200, textBytes: 3 });
+  expect(r.worker.terminationReason).toBe("no-tool-progress");
+  expect(r.protocol?.watchdog?.toolFreeTextBytes).toBe(4);
+}, 5_000);
+
+test("wall timeout still bounds ongoing thought generation", async () => {
+  const thought = updateFrame("agent_thought_chunk", { type: "text", text: "x" });
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `while true; do echo '${thought}'; sleep 0.05; done`;
+  const r = await run(body, 300, [], { timeoutMs: 100, textBytes: 1_000_000 });
+  expect(r.worker.terminationReason).toBe("timeout");
+}, 5_000);
 
 test("guarded ACP end_turn survives TERM-resistant peer missing its durable exit result", async () => {
   const root = await mkdtemp(join(tmpdir(), "acp-guarded-"));
