@@ -27,6 +27,7 @@ export type Phase =
   | "verifying"
   | "verified"
   | "accepted"
+  | "task_blocked"
   | "failed";
 const phases: Phase[] = [
   "prepared",
@@ -36,6 +37,7 @@ const phases: Phase[] = [
   "verifying",
   "verified",
   "accepted",
+  "task_blocked",
   "failed",
 ];
 export interface Fingerprint {
@@ -491,10 +493,11 @@ const allowed: Record<Phase, readonly Phase[]> = {
   prepared: ["worker_starting", "failed"],
   worker_starting: ["worker_running", "failed"],
   worker_running: ["worker_finished", "failed"],
-  worker_finished: ["verifying", "worker_starting", "failed"],
-  verifying: ["verified", "worker_starting", "failed"],
-  verified: ["accepted", "worker_starting", "failed"],
+  worker_finished: ["verifying", "worker_starting", "task_blocked", "failed"],
+  verifying: ["verified", "worker_starting", "task_blocked", "failed"],
+  verified: ["accepted", "worker_starting", "task_blocked", "failed"],
   accepted: [],
+  task_blocked: [],
   failed: [],
 };
 export async function checkpoint(
@@ -524,7 +527,7 @@ export async function reserveAttempt(
   record: Readonly<Record<string, Json>> = {},
 ): Promise<State> {
   const s = await readState(root);
-  if (s.phase === "accepted" || s.phase === "failed")
+  if (s.phase === "accepted" || s.phase === "task_blocked" || s.phase === "failed")
     throw new StateError("cannot reserve attempt from terminal state");
   if (
     !["prepared", "worker_finished", "verifying", "verified"].includes(s.phase)

@@ -1,4 +1,6 @@
-import { writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   createFrozenRun,
   reserveAttempt,
@@ -12,12 +14,17 @@ import {
   type Json,
   type State,
 } from "./state.js";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { executorFor, type AttemptLifecycle } from "./attempt-executor.js";
 import { launchGuarded } from "./guard.js";
 import { OwnershipLock, diagnoseOwnership } from "./ownership.js";
 import { reconcileRun } from "./reconciliation.js";
 import { runVerification } from "./process.js";
+import {
+  readWorkerReport,
+  readWorkerReportBytes,
+  type WorkerReport,
+} from "./worker-report.js";
 import type {
   AttemptRecord,
   RunRecord,
@@ -33,9 +40,98 @@ import {
 } from "./worker-profile.js";
 
 const FAILURE_OUTPUT_LIMIT = 24_000;
+const MAX_SUMMARY_BYTES = 16 * 1024 * 1024;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function summaryObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("immutable summary is not an object");
+  return value as Record<string, unknown>;
+}
+
+function canonicalSummary(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string")
+    return JSON.stringify(value);
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("summary contains non-finite number");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalSummary).join(",")}]`;
+  const object = summaryObject(value);
+  return `{${Object.keys(object).sort().map((key) =>
+    JSON.stringify(key) + ":" + canonicalSummary(object[key]),
+  ).join(",")}}`;
+}
+
+/** Compare run/attempt evidence while permitting only controller timestamps to differ. */
+function summaryEvidence(value: unknown): string {
+  const summary = summaryObject(value);
+  const { finishedAt, attempts, ...rest } = summary;
+  if (typeof finishedAt !== "string" || !Number.isFinite(Date.parse(finishedAt)))
+    throw new Error("immutable summary has invalid completion time");
+  if (!Array.isArray(attempts)) throw new Error("immutable summary lacks attempts");
+  return canonicalSummary({
+    ...rest,
+    attempts: attempts.map((attempt) => {
+      const entry = summaryObject(attempt);
+      const { finishedAt: attemptFinishedAt, ...attemptRest } = entry;
+      if (typeof attemptFinishedAt !== "string" || !Number.isFinite(Date.parse(attemptFinishedAt)))
+        throw new Error("immutable attempt has invalid completion time");
+      return attemptRest;
+    }),
+  });
+}
+
+async function existingSummaryArtifact(
+  evidencePath: string,
+  attempt: number,
+  name: string,
+  expected: RunRecord,
+): Promise<{ readonly artifact: ArtifactRef; readonly record: RunRecord } | undefined> {
+  const path = join(evidencePath, "attempts", String(attempt).padStart(3, "0"), name);
+  let file;
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > MAX_SUMMARY_BYTES)
+      throw new Error("existing immutable summary is not a bounded regular file");
+    const buffer = new Uint8Array(MAX_SUMMARY_BYTES + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await file.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > MAX_SUMMARY_BYTES)
+      throw new Error("existing immutable summary exceeds size limit");
+    const bytes = buffer.slice(0, length);
+    let saved: unknown;
+    try {
+      saved = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    } catch {
+      throw new Error("existing immutable summary is not valid UTF-8 JSON");
+    }
+    if (summaryEvidence(saved) !== summaryEvidence(expected))
+      throw new Error("immutable summary evidence drift");
+    return {
+      artifact: {
+        path: `attempts/${String(attempt).padStart(3, "0")}/${name}`,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.byteLength,
+      },
+      record: saved as RunRecord,
+    };
+  } finally {
+    await file.close();
+  }
 }
 
 function runGit(repositoryPath: string, args: ReadonlyArray<string>): string {
@@ -91,6 +187,12 @@ export async function validateConfig(config: SupervisorConfig): Promise<void> {
       `evidence must be an absolute path: ${config.evidencePath}`,
     );
   }
+  const evidenceRelative = relative(config.repositoryPath, config.evidencePath);
+  if (
+    evidenceRelative === "" ||
+    (!evidenceRelative.startsWith(".." + "/") && evidenceRelative !== "..")
+  )
+    throw new Error("evidence path must be outside the mutable repository worktree");
   if (config.maxAttempts < 1) {
     throw new Error("max attempts must be at least 1");
   }
@@ -274,11 +376,15 @@ function restoredRecord(state: State, config: SupervisorConfig): RunRecord {
             value.failureReportPath === undefined
               ? {}
               : { failureReportPath: value.failureReportPath }),
+            ...(value.workerReport === null || value.workerReport === undefined
+              ? {}
+              : { workerReport: value.workerReport }),
           }),
         ) as unknown as AttemptRecord,
     )
     .sort((a, b) => a.attempt - b.attempt);
   const accepted = state.phase === "accepted" || state.phase === "verified";
+  const taskBlocked = state.phase === "task_blocked";
   return {
     runId: state.runId,
     stage: config.stage,
@@ -286,10 +392,107 @@ function restoredRecord(state: State, config: SupervisorConfig): RunRecord {
     planPath: config.planPath,
     startedAt: state.startedAt,
     finishedAt: state.updatedAt,
-    status: accepted ? "accepted" : "failed",
+    status: accepted ? "accepted" : taskBlocked ? "task-blocked" : "failed",
     ...(accepted ? { acceptedHead: state.candidateHead } : {}),
+    ...(taskBlocked && typeof state.attempt?.blockageReason === "string"
+      ? { blockageReason: state.attempt.blockageReason }
+      : {}),
     attempts,
   };
+}
+
+async function commitTaskBlockedSummary(
+  evidencePath: string,
+  state: State,
+  record: RunRecord,
+): Promise<RunRecord> {
+  const attempt = Math.max(1, state.reservedAttempts);
+  const existing = await existingSummaryArtifact(
+    evidencePath,
+    attempt,
+    "task-blocked-summary.json",
+    record,
+  );
+  const summaryArtifact = existing?.artifact ?? await writeAttemptArtifact(
+    evidencePath,
+    attempt,
+    "task-blocked-summary.json",
+    JSON.parse(JSON.stringify(record)) as Json,
+  );
+  await checkpoint(evidencePath, {
+    phase: "task_blocked",
+    summaryArtifact,
+  });
+  if (existing !== undefined) {
+    await writeRunSummary(
+      evidencePath,
+      JSON.parse(JSON.stringify(existing.record)) as Json,
+    );
+    return existing.record;
+  }
+  await writeRunSummary(
+    evidencePath,
+    JSON.parse(JSON.stringify(record)) as Json,
+  );
+  return record;
+}
+
+async function restoreBlockedReportSnapshot(
+  evidencePath: string,
+  state: State,
+): Promise<State> {
+  if (
+    (state.completedAttempts ?? []).some(
+      (entry) => entry.attempt === state.reservedAttempts,
+    )
+  )
+    return state;
+  const path = join(
+    evidencePath,
+    "attempts",
+    String(state.reservedAttempts).padStart(3, "0"),
+    "worker-report.json",
+  );
+  let report: WorkerReport;
+  let artifact: ArtifactRef;
+  try {
+    const value = await readWorkerReportBytes(path);
+    report = value.report;
+    artifact = {
+      path: `attempts/${String(state.reservedAttempts).padStart(3, "0")}/worker-report.json`,
+      sha256: createHash("sha256").update(value.bytes).digest("hex"),
+      bytes: value.bytes.byteLength,
+    };
+  } catch {
+    const pending = await readWorkerReportBytes(
+      join(evidencePath, `attempt-${state.reservedAttempts}-report.json`),
+    );
+    report = pending.report;
+    artifact = await writeAttemptArtifact(
+      evidencePath,
+      state.reservedAttempts,
+      "worker-report.json",
+      JSON.parse(JSON.stringify(report)) as Json,
+    );
+  }
+  await checkpoint(evidencePath, {
+    attempt: {
+      ...(state.attempt ?? {}),
+      workerReportArtifact: artifact as unknown as Json,
+    } as never,
+  });
+  await checkpointCompletedAttempt(evidencePath, {
+    attempt: state.reservedAttempts,
+    artifacts: [artifact],
+    result: {
+      attempt: state.reservedAttempts,
+      startedAt: state.attempt?.startedAt ?? state.updatedAt,
+      finishedAt: state.updatedAt,
+      workerReport: JSON.parse(JSON.stringify(report)) as Json,
+      taskBlocked: true,
+    },
+  });
+  return await readState(evidencePath);
 }
 
 async function commitAcceptedSummary(
@@ -297,9 +500,16 @@ async function commitAcceptedSummary(
   state: State,
   record: RunRecord,
 ): Promise<RunRecord> {
-  const summaryArtifact = await writeAttemptArtifact(
+  const attempt = Math.max(1, state.reservedAttempts);
+  const existing = await existingSummaryArtifact(
     evidencePath,
-    Math.max(1, state.reservedAttempts),
+    attempt,
+    "run-summary.json",
+    record,
+  );
+  const summaryArtifact = existing?.artifact ?? await writeAttemptArtifact(
+    evidencePath,
+    attempt,
     "run-summary.json",
     JSON.parse(JSON.stringify(record)) as Json,
   );
@@ -310,6 +520,13 @@ async function commitAcceptedSummary(
       : { candidateHead: state.candidateHead }),
     summaryArtifact,
   });
+  if (existing !== undefined) {
+    await writeRunSummary(
+      evidencePath,
+      JSON.parse(JSON.stringify(existing.record)) as Json,
+    );
+    return existing.record;
+  }
   await writeRunSummary(
     evidencePath,
     JSON.parse(JSON.stringify(record)) as Json,
@@ -389,6 +606,54 @@ export async function resumeSupervision(
     if (decision.action === "finalize-verified") {
       const record = restoredRecord({ ...current, phase: "accepted" }, config);
       return await commitAcceptedSummary(evidencePath, current, record);
+    }
+    if (decision.action === "task-blocked") {
+      const reportState =
+        current.phase === "task_blocked"
+          ? current
+          : await restoreBlockedReportSnapshot(evidencePath, current);
+      const report = restoredRecord(reportState, config);
+      const record: RunRecord = {
+        ...report,
+        status: "task-blocked",
+        ...(report.blockageReason === undefined
+          ? { blockageReason: decision.reason }
+          : {}),
+      };
+      if (reportState.phase === "task_blocked") {
+        if (reportState.summaryArtifact !== undefined) {
+          const bytes = await Bun.file(
+            join(evidencePath, reportState.summaryArtifact.path),
+          ).arrayBuffer();
+          const saved = JSON.parse(new TextDecoder().decode(bytes)) as RunRecord;
+          if (
+            saved.runId === reportState.runId &&
+            saved.status === "task-blocked" &&
+            saved.attempts.some(
+              (attempt) => attempt.attempt === reportState.reservedAttempts,
+            )
+          ) {
+            await writeRunSummary(
+              evidencePath,
+              JSON.parse(new TextDecoder().decode(bytes)) as Json,
+            );
+            return saved;
+          }
+          throw new Error("immutable task-blocked summary identity drift");
+        }
+        throw new Error("task-blocked checkpoint is missing its immutable summary");
+      }
+      await checkpoint(evidencePath, {
+        attempt: {
+          ...(reportState.attempt ?? {}),
+          blockageReason: decision.reason,
+        } as never,
+      });
+      return await commitTaskBlockedSummary(
+        evidencePath,
+        await readState(evidencePath),
+        record,
+      );
     }
     if (
       decision.action === "rerun-verifier" ||
@@ -705,6 +970,8 @@ async function superviseOwned(
     await reserveAttempt(config.evidencePath, { startedAt: attemptStartedAt });
     const preHead = head(config.repositoryPath);
     const prefix = `${config.evidencePath}/attempt-${attempt}`;
+    // Evidence is outside the mutable worktree and each worker gets one path.
+    const workerReportPath = prefix + "-report.json";
 
     console.log(
       `[stage ${config.stage} attempt ${attempt}] worker.started head=${preHead.slice(0, 8)}`,
@@ -729,6 +996,9 @@ async function superviseOwned(
       attempt,
       failureReportPath,
       prefix,
+      ...(frozenConfig.workerReportRequired
+        ? { workerReportPath }
+        : {}),
       onLifecycle,
       guardedLaunch: (command, controlPath, beforeAuthorize) =>
         launchGuarded({
@@ -761,6 +1031,9 @@ async function superviseOwned(
     });
     const worker = execution.worker;
     const artifacts: ArtifactRef[] = [];
+    let workerReport: WorkerReport | undefined;
+    let workerReportFailure: string | undefined;
+    let workerReportArtifact: ArtifactRef | undefined;
     const workerArtifact = await writeAttemptArtifact(
       config.evidencePath,
       attempt,
@@ -793,6 +1066,32 @@ async function superviseOwned(
       },
     );
     artifacts.push(workerArtifact, gitArtifact);
+    if (frozenConfig.workerReportRequired) {
+      if (
+        worker.exitCode === 0 &&
+        worker.terminationReason === undefined &&
+        !worker.resultUnavailable
+      ) {
+        try {
+          // The executor only returns after its cleanup lifecycle completes.
+          workerReport = await readWorkerReport(workerReportPath);
+          workerReportArtifact = await writeAttemptArtifact(
+            config.evidencePath,
+            attempt,
+            "worker-report.json",
+            JSON.parse(JSON.stringify(workerReport)) as Json,
+          );
+          artifacts.push(workerReportArtifact);
+        } catch (error) {
+          workerReportFailure =
+            "missing or invalid worker report: " +
+            (error instanceof Error ? error.message : String(error));
+        }
+      } else {
+        workerReportFailure =
+          "required worker report unavailable after unsuccessful worker completion";
+      }
+    }
     await checkpoint(config.evidencePath, {
       phase: "worker_finished",
       attempt: JSON.parse(
@@ -803,6 +1102,9 @@ async function superviseOwned(
           lifecycle: "cleanup_complete",
           workerArtifact,
           gitArtifact,
+          ...(workerReportArtifact === undefined
+            ? {}
+            : { workerReportArtifact }),
           worker,
         }),
       ) as never,
@@ -826,7 +1128,7 @@ async function superviseOwned(
       postHead,
       originalRef,
     );
-    const problem =
+    const normalProblem =
       historyFailure ??
       workerProblem(
         worker.exitCode,
@@ -836,10 +1138,30 @@ async function superviseOwned(
         postStatus,
       );
 
+    // A decision-blocked outcome is authoritative only after a normal process
+    // completion and intact history. It may deliberately leave work uncommitted
+    // while awaiting a human decision, but never masks process/protocol/history
+    // safety failures.
+    const decisionBlocked =
+      workerReport?.status === "blocked" &&
+      historyFailure === undefined &&
+      worker.exitCode === 0 &&
+      worker.terminationReason === undefined &&
+      !worker.resultUnavailable &&
+      (execution.protocol === undefined ||
+        (execution.protocol.error === undefined &&
+          execution.protocol.cleanupComplete));
+    const problem =
+      decisionBlocked && normalProblem !== undefined &&
+      (normalProblem === "worker left a dirty worktree" ||
+        normalProblem === "worker produced no new commit")
+        ? undefined
+        : normalProblem;
+
     let verification: VerificationResult | undefined;
     let verifierIntegrityFailure = false;
-    let failureReason = problem;
-    if (problem === undefined) {
+    let failureReason = problem ?? workerReportFailure;
+    if (failureReason === undefined && !decisionBlocked) {
       console.log(
         `[stage ${config.stage} attempt ${attempt}] verification.started`,
       );
@@ -925,7 +1247,10 @@ async function superviseOwned(
         failureReason = "verifier left a dirty worktree";
         verifierIntegrityFailure = true;
       }
-      if (failureReason === undefined) {
+      if (
+        failureReason === undefined &&
+        (workerReport?.knownGaps.length ?? 0) === 0
+      ) {
         await checkpointCompletedAttempt(config.evidencePath, {
           attempt,
           artifacts,
@@ -941,6 +1266,7 @@ async function superviseOwned(
               worker,
               protocol: execution.protocol ?? null,
               verification,
+              workerReport: workerReport ?? null,
             }),
           ) as Record<string, Json>,
         });
@@ -951,6 +1277,18 @@ async function superviseOwned(
         });
       }
     }
+
+    const knownGapsReported =
+      workerReport?.status === "complete" &&
+      workerReport.knownGaps.length > 0;
+    const taskBlocked =
+      !verifierIntegrityFailure &&
+      (decisionBlocked || (knownGapsReported && problem === undefined));
+    const blockageReason = decisionBlocked
+      ? workerReport?.blocker?.decisionNeeded ?? "worker reported blocked"
+      : knownGapsReported
+        ? "worker reported known gaps: " + workerReport!.knownGaps.join("; ")
+        : undefined;
 
     let currentFailureReportPath: string | undefined;
     if (failureReason !== undefined) {
@@ -977,7 +1315,7 @@ async function superviseOwned(
       );
     }
 
-    if (failureReason !== undefined)
+    if (failureReason !== undefined && !taskBlocked)
       await checkpointCompletedAttempt(config.evidencePath, {
         attempt,
         artifacts,
@@ -994,6 +1332,29 @@ async function superviseOwned(
             protocol: execution.protocol ?? null,
             verification: verification ?? null,
             failureReportPath: currentFailureReportPath ?? null,
+            workerReport: workerReport ?? null,
+          }),
+        ) as Record<string, Json>,
+      });
+    if (taskBlocked)
+      await checkpointCompletedAttempt(config.evidencePath, {
+        attempt,
+        artifacts,
+        result: JSON.parse(
+          JSON.stringify({
+            accepted: false,
+            taskBlocked: true,
+            blockageReason,
+            attempt,
+            startedAt: attemptStartedAt,
+            finishedAt: now(),
+            preHead,
+            postHead,
+            postStatus,
+            worker,
+            protocol: execution.protocol ?? null,
+            verification: verification ?? null,
+            workerReport,
           }),
         ) as Record<string, Json>,
       });
@@ -1012,7 +1373,33 @@ async function superviseOwned(
       ...(currentFailureReportPath === undefined
         ? {}
         : { failureReportPath: currentFailureReportPath }),
+      ...(workerReport === undefined ? {} : { workerReport }),
     });
+
+    if (taskBlocked) {
+      const record: RunRecord = {
+        runId: config.runId,
+        stage: config.stage,
+        repositoryPath: config.repositoryPath,
+        planPath: config.planPath,
+        startedAt,
+        finishedAt: now(),
+        status: "task-blocked",
+        blockageReason: blockageReason ?? "worker reported blocked",
+        attempts,
+      };
+      await checkpoint(config.evidencePath, {
+        attempt: {
+          ...((await readState(config.evidencePath)).attempt ?? {}),
+          blockageReason: record.blockageReason,
+        } as never,
+      });
+      return await commitTaskBlockedSummary(
+        config.evidencePath,
+        await readState(config.evidencePath),
+        record,
+      );
+    }
 
     if (failureReason === undefined) {
       const record: RunRecord = {

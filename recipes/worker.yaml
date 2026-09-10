@@ -24,6 +24,17 @@ parameters:
     requirement: required
     description: "Absolute path to the prior failure report, or /dev/null on the first attempt."
 
+  - key: worker_report_path
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Supervisor-owned report output path when structured outcomes are required."
+  - key: worker_judgment
+    input_type: string
+    requirement: optional
+    default: ""
+    description: "Worker judgment and structured-report contract from the supervisor."
+
 instructions: |
   You are the sole implementation worker for one bounded stage. Do not
   delegate. Work only in the supplied repository.
@@ -39,6 +50,11 @@ instructions: |
   Inspect the final diff, commit all accepted changes without amending or
   rewriting prior commits, and finish with a clean worktree.
 
+  If a structured-report path is supplied, follow the worker judgment below.
+  A supported blocker may preserve uncommitted work instead of a success commit.
+
+  {{ worker_judgment }}
+
   Your prose is advisory. The supervisor will accept work only from Git state
   and an independent verifier.
 
@@ -48,6 +64,7 @@ prompt: |
   Repository: {{ repository_path }}
   Plan: {{ plan_path }}
   Prior failure report: {{ failure_report_path }}
+  Structured report output (when supplied): {{ worker_report_path }}
 
 extensions:
   - type: builtin

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { State } from "./state.js";
+import { readWorkerReportBytes, type WorkerReport } from "./worker-report.js";
 
 export type ReconciliationAction =
   | "reuse-accepted"
@@ -8,6 +10,7 @@ export type ReconciliationAction =
   | "rerun-verifier"
   | "verify-candidate"
   | "fresh-repair"
+  | "task-blocked"
   | "terminal"
   | "blocked";
 export interface Reconciliation {
@@ -133,6 +136,115 @@ async function verificationProof(
     return false;
   }
 }
+
+async function requiredWorkerReport(root: string, s: State): Promise<boolean> {
+  try {
+    const config: unknown = JSON.parse(
+      await readFile(join(root, s.inputs.config.path), "utf8"),
+    );
+    return (
+      !!config &&
+      typeof config === "object" &&
+      (config as { workerReportRequired?: unknown }).workerReportRequired ===
+        true
+    );
+  } catch {
+    // Frozen states created before structured outcomes are compatibility mode.
+    return false;
+  }
+}
+
+function reportRef(s: State): Ref | undefined {
+  const attempt = s.attempt as { workerReportArtifact?: unknown } | undefined;
+  if (ref(attempt?.workerReportArtifact)) return attempt.workerReportArtifact;
+  const completed = (s.completedAttempts ?? []).find(
+    (entry) => entry.attempt === s.reservedAttempts,
+  );
+  return completed?.artifacts.find((artifact) =>
+    artifact.path.endsWith("/worker-report.json"),
+  );
+}
+
+/**
+ * The deterministic artifact fallback closes the crash window between writing a
+ * report snapshot and recording its reference in state.  It is never enough to
+ * accept a complete outcome; it only preserves a blocked worker's decision.
+ */
+async function workerReport(
+  root: string,
+  s: State,
+): Promise<
+  | { readonly report: WorkerReport; readonly durable: boolean; readonly pending: boolean }
+  | { readonly error: string }
+  | undefined
+> {
+  const reference = reportRef(s);
+  const artifactPath = join(
+    root,
+    "attempts",
+    String(s.reservedAttempts).padStart(3, "0"),
+    "worker-report.json",
+  );
+  let path = reference === undefined ? artifactPath : join(root, reference.path);
+  try {
+    let value: Awaited<ReturnType<typeof readWorkerReportBytes>>;
+    try {
+      value = await readWorkerReportBytes(path);
+    } catch (error) {
+      if (reference !== undefined) throw error;
+      path = join(root, `attempt-${s.reservedAttempts}-report.json`);
+      value = await readWorkerReportBytes(path);
+    }
+    const { report, bytes } = value;
+    if (
+      reference !== undefined &&
+      (bytes.byteLength !== reference.bytes ||
+        createHash("sha256").update(bytes).digest("hex") !== reference.sha256)
+    )
+      return { error: "worker report artifact drift" };
+    return {
+      report,
+      durable: reference !== undefined,
+      pending: reference === undefined && path !== artifactPath,
+    };
+  } catch (error) {
+    if (reference !== undefined)
+      return {
+        error:
+          "invalid worker report: " +
+          (error instanceof Error ? error.message : String(error)),
+      };
+    return undefined;
+  }
+}
+
+async function completeReportProof(root: string, s: State): Promise<boolean> {
+  const outcome = await workerReport(root, s);
+  return (
+    outcome !== undefined &&
+    "report" in outcome &&
+    outcome.durable &&
+    outcome.report.status === "complete" &&
+    outcome.report.knownGaps.length === 0
+  );
+}
+
+function normalRecordedWorker(state: State): boolean {
+  const attempt = state.attempt as
+    | { worker?: { exitCode?: unknown; terminationReason?: unknown; resultUnavailable?: unknown } }
+    | undefined;
+  const worker = attempt?.worker;
+  const protocol = state.protocol as
+    | { error?: unknown; cleanupComplete?: unknown }
+    | undefined;
+  return (
+    worker?.exitCode === 0 &&
+    worker.terminationReason === undefined &&
+    worker.resultUnavailable !== true &&
+    (protocol === undefined ||
+      (protocol.error === undefined && protocol.cleanupComplete === true))
+  );
+}
 export async function reconcileRun(
   evidencePath: string,
   state: State,
@@ -144,11 +256,42 @@ export async function reconcileRun(
   if (!head || !ref) return { action: "blocked", reason: "cannot inspect Git" };
   if (state.phase === "failed")
     return { action: "terminal", reason: "terminal failure recorded" };
+  if (state.phase === "task_blocked")
+    return { action: "task-blocked", reason: "task blocked outcome recorded" };
+  const reportRequired = await requiredWorkerReport(evidencePath, state);
+  const outcome = reportRequired
+    ? await workerReport(evidencePath, state)
+    : undefined;
   const target = state.candidateHead ?? state.initial.head;
   if (ref !== state.initial.ref)
     return { action: "blocked", reason: "branch drift" };
+  if (!descendant(w, state.initial.head, head))
+    return { action: "terminal", reason: "current worktree history violation" };
   if (!descendant(w, state.initial.head, target))
     return { action: "terminal", reason: "worker history violation" };
+  if (outcome !== undefined && "error" in outcome)
+    return { action: "blocked", reason: outcome.error };
+  if (
+    ["verifying", "verified"].includes(state.phase) &&
+    (head !== target || !clean(w))
+  )
+    return { action: "blocked", reason: "verifier candidate drift" };
+  const veto = outcome !== undefined && "report" in outcome &&
+    (outcome.report.status === "blocked" || outcome.report.knownGaps.length > 0);
+  if (veto && outcome !== undefined && "report" in outcome) {
+    if (state.phase === "accepted")
+      return { action: "blocked", reason: "accepted checkpoint conflicts with worker report" };
+    if (!normalRecordedWorker(state) || attemptFailed(state))
+      return { action: "blocked", reason: "worker report veto exists but normal completion is not durably proven" };
+    if (outcome.report.status === "complete" && (!clean(w) || head === state.initial.head))
+      return { action: "blocked", reason: "complete report conflicts with unfinished candidate" };
+    return {
+      action: "task-blocked",
+      reason: outcome.report.status === "blocked"
+        ? outcome.report.blocker!.decisionNeeded
+        : "worker reported known gaps: " + outcome.report.knownGaps.join("; "),
+    };
+  }
   if (state.phase === "prepared") {
     if (head !== state.initial.head || !clean(w))
       return { action: "blocked", reason: "prepared state drift" };
@@ -159,7 +302,8 @@ export async function reconcileRun(
   if (state.phase === "accepted") {
     return head === target &&
       clean(w) &&
-      (await verificationProof(evidencePath, state, target, ref))
+      (await verificationProof(evidencePath, state, target, ref)) &&
+      (!reportRequired || (await completeReportProof(evidencePath, state)))
       ? {
           action: "reuse-accepted",
           reason: "accepted exact candidate",
@@ -173,7 +317,8 @@ export async function reconcileRun(
   if (state.phase === "verified") {
     return head === target &&
       clean(w) &&
-      (await verificationProof(evidencePath, state, target, ref))
+      (await verificationProof(evidencePath, state, target, ref)) &&
+      (!reportRequired || (await completeReportProof(evidencePath, state)))
       ? {
           action: "finalize-verified",
           reason: "verified exact candidate",
@@ -187,6 +332,10 @@ export async function reconcileRun(
   if (state.phase === "verifying") {
     if (!head || head !== target || !clean(w))
       return { action: "blocked", reason: "verifier candidate drift" };
+    if (reportRequired && !(await completeReportProof(evidencePath, state)))
+      return state.reservedAttempts < maxAttempts
+        ? { action: "fresh-repair", reason: "missing or invalid worker report" }
+        : { action: "terminal", reason: "attempt budget exhausted without valid worker report" };
     if (await verificationFailure(evidencePath, state))
       return state.reservedAttempts < maxAttempts
         ? { action: "fresh-repair", reason: "durable verifier failure" }
@@ -219,7 +368,11 @@ export async function reconcileRun(
       return state.reservedAttempts < maxAttempts
         ? { action: "fresh-repair", reason: "dirty interrupted work preserved" }
         : { action: "terminal", reason: "attempt budget exhausted" };
-    if (head !== state.initial.head && descendant(w, state.initial.head, head))
+    if (
+      head !== state.initial.head &&
+      descendant(w, state.initial.head, head) &&
+      (!reportRequired || (await completeReportProof(evidencePath, state)))
+    )
       return {
         action: "verify-candidate",
         reason: "unrecorded clean descendant",

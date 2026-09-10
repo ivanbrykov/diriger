@@ -1,3 +1,4 @@
+import { investigationSeconds, workerJudgmentInstructions } from "./worker-report.js";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { runObservedProcess } from "./process.js";
@@ -57,6 +58,7 @@ export interface AttemptExecutorInput {
   config: SupervisorConfig;
   attempt: number;
   failureReportPath: string;
+  workerReportPath?: string;
   prefix: string;
   onLifecycle?: (state: AttemptLifecycle) => void | Promise<void>;
   guardedLaunch?: (
@@ -99,6 +101,14 @@ export class LegacyGooseAttemptExecutor implements AttemptExecutor {
       "--max-tool-repetitions",
       "8",
     ];
+    if (input.workerReportPath !== undefined) {
+      command.push(
+        "--params", "worker_report_path=" + input.workerReportPath,
+        "--params", "worker_judgment=" + workerJudgmentInstructions(
+          input.workerReportPath, investigationSeconds(config.workerTimeoutMs),
+        ),
+      );
+    }
     const guarded =
       input.guardedLaunch === undefined
         ? undefined
@@ -232,7 +242,7 @@ export class AcpAttemptExecutor implements AttemptExecutor {
 
     const out = Bun.file(prefix + "-worker.acp.jsonl").writer(),
       err = Bun.file(prefix + "-worker.stderr.log").writer();
-    const stdin = child.stdin as { write(value: string): void; end(): void };
+    const stdin = child.stdin as { write(value: string): void; flush(): number | Promise<number>; end(): void };
     const calls = new Map<
       number,
       { resolve(value: unknown): void; reject(error: Error): void }
@@ -267,6 +277,7 @@ export class AcpAttemptExecutor implements AttemptExecutor {
     const send = (message: unknown) => {
       try {
         stdin.write(JSON.stringify(message) + "\n");
+        void Promise.resolve(stdin.flush()).catch(() => fail("ACP stdin flush failed", "protocol-error"));
       } catch {
         fail("ACP stdin closed", "protocol-error");
       }
@@ -514,6 +525,10 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         "Stage: " + config.stage,
         "Attempt: " + attempt,
         "Failure report: " + failureReportPath,
+        ...(input.workerReportPath === undefined ? [] : [
+          "",
+          workerJudgmentInstructions(input.workerReportPath, investigationSeconds(config.workerTimeoutMs)),
+        ]),
       ].join("\n");
       await lifecycle("prompt_in_flight");
       lastToolAt = Date.now();

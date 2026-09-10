@@ -14,10 +14,11 @@ const USAGE = [
   "  diriger recover --evidence PATH [--apply] [--json]",
   "  diriger resume --evidence PATH [--json]",
   "",
-  "Status exits: 0 ready/accepted/preview; 1 terminal; 2 invalid input/state; 3 active/blocked",
+  "Status exits: 0 ready/accepted/preview; 1 terminal; 2 invalid input/state; 3 ownership unsafe; 4 task blocked",
   "",
   "Options:",
   "  --worker-recipe PATH            Required for Goose workers",
+  "  --worker-report required|optional  Structured worker outcome requirement (default: required)",
   "  --goose PATH                    Goose executable (default: goose)",
   "  --worker-kind goose|acp         Attempt adapter (default: goose)",
   "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array",
@@ -147,9 +148,13 @@ async function durableStatus(
   const status =
     inspection.ownership?.state === "active"
       ? "active"
-      : inspection.blocked.length
+      : inspection.blocked.length || decision.action === "blocked"
         ? "blocked"
-        : decision.action === "terminal"
+        : decision.action === "task-blocked" ||
+            (decision.action === "terminal" &&
+              inspection.state.phase === "task_blocked")
+          ? "task-blocked"
+          : decision.action === "terminal"
           ? "failed"
           : decision.action === "reuse-accepted"
             ? "accepted"
@@ -160,9 +165,14 @@ async function durableStatus(
       reasons: [...inspection.blocked, decision.reason],
       actions: inspection.actions,
       decision,
+      ...(inspection.state.attempt?.blockageReason === undefined
+        ? {}
+        : { blockageReason: inspection.state.attempt.blockageReason }),
     },
     code:
-      status === "active" || status === "blocked"
+      status === "task-blocked"
+        ? 4
+        : status === "active" || status === "blocked"
         ? 3
         : status === "failed"
           ? 1
@@ -182,6 +192,9 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
   if (kind === "acp" && acpCommand === undefined) {
     throw new Error("--worker-kind acp requires --acp-command");
   }
+  const reportMode = values.get("worker-report") ?? "required";
+  if (reportMode !== "required" && reportMode !== "optional")
+    throw new Error("--worker-report must be required or optional");
   const timestamp = new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
@@ -198,6 +211,7 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
     gooseBin: values.get("goose") ?? "goose",
     ...(kind === "goose" ? {} : { workerKind: kind }),
     ...(acpCommand === undefined ? {} : { acpCommand }),
+    workerReportRequired: reportMode === "required",
     maxAttempts: positiveInteger(values, "max-attempts", 2),
     workerTimeoutMs:
       positiveInteger(values, "worker-timeout-seconds", 1_800) * 1_000,
@@ -291,7 +305,7 @@ async function main(): Promise<void> {
             ? JSON.stringify(record)
             : JSON.stringify(record, null, 2),
         );
-        process.exitCode = record.status === "accepted" ? 0 : 1;
+        process.exitCode = record.status === "accepted" ? 0 : record.status === "task-blocked" ? 4 : 1;
       } catch (error) {
         if (error instanceof ResumeBlockedError) {
           console.error("Error: " + error.message);
@@ -303,7 +317,7 @@ async function main(): Promise<void> {
       return;
     }
     const record = await supervise(await loadRunConfig(args));
-    process.exitCode = record.status === "accepted" ? 0 : 1;
+    process.exitCode = record.status === "accepted" ? 0 : record.status === "task-blocked" ? 4 : 1;
   } catch (error) {
     console.error(
       "Error: " + (error instanceof Error ? error.message : String(error)),

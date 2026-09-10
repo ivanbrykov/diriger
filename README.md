@@ -53,6 +53,72 @@ Both modes accept `--max-attempts`, `--worker-timeout-seconds`,
 `--no-tool-timeout-seconds`, `--no-tool-output-bytes`, and `--run-id`.
 The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
 
+## Worker judgment and structured outcomes
+
+New CLI runs require a worker report by default. The supplied ACP brief and bundled
+Goose recipe instruct the worker to prefer established platform/framework features,
+then focused maintained libraries; challenge implementation suggestions with evidence;
+and disclose known gaps even when prescribed tests pass. Explicit constraints and
+scope still apply. The investigation allowance is at most five minutes or one quarter
+of the per-worker wall budget, whichever is smaller (or a smaller plan allowance).
+This is guidance to the worker within the enforced wall deadline, not an independently
+measured investigation timer.
+
+The supervisor provides a unique report path outside the mutable worktree. Before
+ending its session, the worker writes UTF-8 JSON, limited to 64 KiB:
+
+```json
+{
+  "version": 1,
+  "status": "complete",
+  "summary": "Implemented the requested behavior",
+  "knownGaps": [],
+  "decisions": ["Used the framework's native capability after checking its contract"],
+  "validation": ["Focused tests passed"]
+}
+```
+
+For an unresolved foundational decision or insufficient authority, use `"status":
+"blocked"` and add:
+
+```json
+{
+  "blocker": {
+    "assumption": "The platform supports the required behavior",
+    "evidence": ["The minimal reproduction fails on the installed runtime"],
+    "attemptedApproaches": ["Checked platform documentation and tested the minimal case"],
+    "smallestAlternative": "Use the supported platform mechanism",
+    "decisionNeeded": "Clarify the contract before implementation continues"
+  }
+}
+```
+
+Include the common report fields as well. Describe changed files and test state in
+summary/validation. A blocked report may preserve dirty partial work without a
+fabricated success commit. A complete report with nonempty `knownGaps` also withholds
+acceptance and returns control to the caller. These outcomes are `task-blocked`
+(exit 4), distinct from ownership/recovery safety blockage (exit 3). They stop
+automatic repair attempts; `resume` reports the same terminal task outcome rather
+than silently granting new authority or a fresh budget.
+
+A complete, gap-free report is necessary for report-required acceptance, but does
+not replace clean descendant history, successful execution/cleanup, and independent
+verification. Process/protocol/history violations remain failures. Reported validation
+is advisory; the report can veto acceptance but cannot certify success. The supervisor
+cannot detect gaps the worker fails to disclose.
+
+Reports are read after worker cleanup and snapshotted into immutable attempt evidence.
+Missing or invalid required reports cannot be accepted. Recovery must preserve this
+gate, including when a crash interrupts finalization. Existing frozen runs retain their
+original reporting policy; do not edit their inputs to change it.
+
+For an existing custom recipe that does not support the contract, explicitly select
+`--worker-report optional` to retain legacy acceptance. That mode does not provide the
+report gate. Custom recipes used with required reporting must accept and follow
+`worker_report_path` and `worker_judgment` parameters. Programmatic `supervise()` callers
+opt in with `workerReportRequired: true`; omitted fields preserve compatibility with
+existing callers and evidence.
+
 ## Freeze the verifier closure
 
 By default a verifier is declared self-contained. For a verifier that depends
@@ -133,6 +199,7 @@ Exit codes are consistent across commands:
 - `1`: terminal failed result.
 - `2`: invalid arguments, configuration, or durable state.
 - `3`: active ownership or a blocked/unsafe recovery state.
+- `4`: worker-reported task blockage or declared known gaps; caller decision required.
 
 ## Acceptance, history, and ownership
 

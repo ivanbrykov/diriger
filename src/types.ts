@@ -8,6 +8,8 @@ export interface SupervisorConfig {
   readonly verifierDependencies?: ReadonlyArray<string>;
   readonly verifierSnapshotRoot?: string;
   readonly workerRecipePath?: string;
+  /** Require a structured worker outcome report before a candidate can be accepted. */
+  readonly workerReportRequired?: boolean;
   readonly evidencePath: string;
   readonly gooseBin: string;
   readonly workerKind?: "goose" | "acp";
@@ -87,6 +89,7 @@ export interface AttemptRecord {
   };
   readonly verification?: VerificationResult;
   readonly failureReportPath?: string;
+  readonly workerReport?: import("./worker-report.js").WorkerReport;
 }
 
 export interface RunRecord {
@@ -96,7 +99,9 @@ export interface RunRecord {
   readonly planPath: string;
   readonly startedAt: string;
   readonly finishedAt: string;
-  readonly status: "accepted" | "failed";
+  readonly status: "accepted" | "failed" | "task-blocked";
   readonly acceptedHead?: string;
+  /** Present when the worker explicitly stopped for a decision or known gap. */
+  readonly blockageReason?: string;
   readonly attempts: ReadonlyArray<AttemptRecord>;
 }
