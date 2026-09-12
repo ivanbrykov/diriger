@@ -245,3 +245,7 @@ overflow terminates the owned group. Verifier streams are capped at 8 MiB each;
 an overflow is drained, recorded as a verifier failure, and only bounded output
 is retained. The verifier wall-time limit is ten minutes. Failure reports keep
 at most 24,000 characters of verifier output.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
