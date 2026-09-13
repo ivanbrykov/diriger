@@ -12,7 +12,7 @@ interface FileIdentity {
 }
 export interface WorkerProfile {
   readonly version: 2;
-  readonly kind: "goose" | "acp";
+  readonly kind: "acp";
   readonly argv: readonly string[];
   readonly executable: FileIdentity & {
     readonly exists: true;
@@ -58,9 +58,7 @@ type OpenAiRouteKey = (typeof OPENAI_ROUTE_KEYS)[number];
 const hash = (value: Uint8Array) =>
   createHash("sha256").update(value).digest("hex");
 function commandFor(config: SupervisorConfig): readonly string[] {
-  return config.workerKind === "acp"
-    ? (config.acpCommand ?? [])
-    : [config.gooseBin];
+  return config.acpCommand ?? [];
 }
 async function fileIdentity(path: string): Promise<FileIdentity> {
   try {
@@ -159,7 +157,7 @@ export async function captureWorkerProfile(
   const environment = selectedEnvironment(env);
   return {
     version: 2,
-    kind: config.workerKind === "acp" ? "acp" : "goose",
+    kind: "acp",
     argv: [...argv],
     executable: executable as WorkerProfile["executable"],
     environment,

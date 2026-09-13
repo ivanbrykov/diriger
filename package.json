@@ -5,8 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "diriger": "./src/cli.ts",
-    "goose-supervisor": "./src/cli.ts"
+    "diriger": "./src/cli.ts"
   },
   "scripts": {
     "dev": "bun src/cli.ts",

@@ -27,11 +27,11 @@ function git(repo: string, args: readonly string[]): string {
 async function fixture(workerReportRequired: boolean) {
   const root = await mkdtemp(join(tmpdir(), "diriger-summary-crash-"));
   roots.push(root);
-  const repo = join(root, "repo"), evidence = join(root, "evidence"), plan = join(root, "plan.md"), recipe = join(root, "recipe.yaml"), verifier = join(root, "verify");
+  const repo = join(root, "repo"), evidence = join(root, "evidence"), plan = join(root, "plan.md"), prompt = join(root, "worker.md"), verifier = join(root, "verify");
   await mkdir(repo);
   await writeFile(join(repo, "README.md"), "base\n");
   await writeFile(plan, "work\n");
-  await writeFile(recipe, "name: fake\n");
+  await writeFile(prompt, "{{ plan }}\n{{ worker_judgment }}\n");
   await writeFile(verifier, "#!/usr/bin/env bash\nexit 0\n");
   await chmod(verifier, 0o755);
   git(repo, ["init", "-q", "-b", "main"]);
@@ -44,14 +44,16 @@ async function fixture(workerReportRequired: boolean) {
     planPath: plan,
     stage: "summary",
     verifierPath: verifier,
-    workerRecipePath: recipe,
+    promptPath: prompt,
     evidencePath: evidence,
-    gooseBin: join(root, "goose"),
+    acpCommand: ["python3", join(root, "agent.py")],
     workerReportRequired,
     maxAttempts: 2,
     workerTimeoutMs: 5_000,
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 1_000,
+    maxToolCalls: 100,
+    maxToolRepetitions: 8,
     runId: workerReportRequired ? "blocked-summary" : "accepted-summary",
   };
   const initial = {
@@ -65,7 +67,7 @@ async function fixture(workerReportRequired: boolean) {
     resolvedConfig: config as unknown as import("../src/state.js").Json,
     initial,
     planPath: plan,
-    recipePath: recipe,
+    promptPath: prompt,
     verifier: { argv: [verifier], cwd: repo, entryPath: verifier, selfContained: true },
   });
   return { repo, evidence, config, initial };

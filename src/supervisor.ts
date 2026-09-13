@@ -15,7 +15,7 @@ import {
   type State,
 } from "./state.js";
 import { isAbsolute, join, relative } from "node:path";
-import { executorFor, type AttemptLifecycle } from "./attempt-executor.js";
+import { AcpAttemptExecutor, type AttemptLifecycle } from "./attempt-executor.js";
 import { launchGuarded } from "./guard.js";
 import { OwnershipLock, diagnoseOwnership } from "./ownership.js";
 import { reconcileRun } from "./reconciliation.js";
@@ -170,12 +170,7 @@ async function assertFile(path: string, label: string): Promise<void> {
 export async function validateConfig(config: SupervisorConfig): Promise<void> {
   await assertFile(config.planPath, "plan");
   await assertFile(config.verifierPath, "verifier");
-  if (config.workerKind !== "acp") {
-    if (config.workerRecipePath === undefined) {
-      throw new Error("worker recipe is required for a Goose worker");
-    }
-    await assertFile(config.workerRecipePath, "worker recipe");
-  }
+  await assertFile(config.promptPath, "worker prompt");
 
   if (!isAbsolute(config.repositoryPath)) {
     throw new Error(
@@ -892,7 +887,6 @@ async function superviseOwned(
       resolvedConfig: JSON.parse(
         JSON.stringify({
           ...config,
-          workerRecipePath: config.workerRecipePath ?? null,
           acpCommand:
             config.acpCommand === undefined ? null : [...config.acpCommand],
         }),
@@ -903,9 +897,7 @@ async function superviseOwned(
         worktree: config.repositoryPath,
       },
       planPath: config.planPath,
-      ...(config.workerRecipePath === undefined
-        ? {}
-        : { recipePath: config.workerRecipePath }),
+      promptPath: config.promptPath,
       ...(newProfile === undefined
         ? {}
         : { profile: newProfile as unknown as Json }),
@@ -932,12 +924,12 @@ async function superviseOwned(
   const frozenConfig: SupervisorConfig = {
     ...config,
     planPath: join(config.evidencePath, frozen.inputs.plan.path),
-    ...(frozen.inputs.recipe === undefined
+    ...(frozen.inputs.prompt === undefined
       ? {}
       : {
-          workerRecipePath: join(
+          promptPath: join(
             config.evidencePath,
-            frozen.inputs.recipe.path,
+            frozen.inputs.prompt.path,
           ),
         }),
     ...(frozen.inputs.profile === undefined
@@ -952,7 +944,7 @@ async function superviseOwned(
           ),
         }),
   };
-  const executor = executorFor(frozenConfig);
+  const executor = new AcpAttemptExecutor();
   const originalRef = runGit(config.repositoryPath, [
     "rev-parse",
     "--symbolic-full-name",

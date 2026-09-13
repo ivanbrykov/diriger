@@ -19,10 +19,11 @@ function git(repo: string, args: readonly string[]): void {
 test("a supervised ACP blocked report is terminal without verifier or a retry", async () => {
   const root = await mkdtemp(join(tmpdir(), "acp-worker-outcome-"));
   roots.push(root);
-  const repo = join(root, "repo"), evidence = join(root, "evidence"), plan = join(root, "plan.md"), verifier = join(root, "verify"), agent = join(root, "agent.py"), marker = join(root, "verifier-ran");
+  const repo = join(root, "repo"), evidence = join(root, "evidence"), plan = join(root, "plan.md"), prompt = join(root, "worker.md"), verifier = join(root, "verify"), agent = join(root, "agent.py"), marker = join(root, "verifier-ran");
   await mkdir(repo);
   await writeFile(join(repo, "README.md"), "base\n");
   await writeFile(plan, "resolve the contract\n");
+  await writeFile(prompt, "{{ plan }}\nRepository: {{ repository_path }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n");
   await writeFile(verifier, `#!/usr/bin/env bash\nset -eu\ntouch ${marker}\n`);
   await chmod(verifier, 0o755);
   await writeFile(agent, [
@@ -59,15 +60,16 @@ test("a supervised ACP blocked report is terminal without verifier or a retry", 
     planPath: plan,
     stage: "acp-outcome",
     verifierPath: verifier,
+    promptPath: prompt,
     evidencePath: evidence,
-    gooseBin: "goose",
-    workerKind: "acp",
     acpCommand: ["python3", agent],
     workerReportRequired: true,
     maxAttempts: 2,
     workerTimeoutMs: 10_000,
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 100_000,
+    maxToolCalls: 100,
+    maxToolRepetitions: 8,
     runId: "acp-outcome",
   };
   const record = await supervise(config);
