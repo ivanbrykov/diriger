@@ -32,52 +32,71 @@ function git(repository: string, args: ReadonlyArray<string>): void {
   }
 }
 
-async function fixture(): Promise<SupervisorConfig> {
+const AGENT_PREAMBLE = `#!/usr/bin/env python3
+import json, re, sys
+def receive():
+    line = sys.stdin.readline()
+    if not line: sys.exit(1)
+    return json.loads(line)
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(',', ':')) + '\\n')
+    sys.stdout.flush()
+init = receive()
+send({'jsonrpc':'2.0','id':init['id'],'result':{'protocolVersion':1}})
+session = receive()
+repo = session['params']['cwd']
+send({'jsonrpc':'2.0','id':session['id'],'result':{'sessionId':'e2e'}})
+prompt = receive()
+brief = '\\n'.join(part.get('text','') for part in prompt['params']['prompt'] if isinstance(part, dict))
+report = re.search(r'^Failure report: (\\S+)$', brief, re.M).group(1)
+`;
+const AGENT_EPILOGUE = `send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+while sys.stdin.readline(): pass
+`;
+
+async function writeAgent(path: string, work: string): Promise<void> {
+  await writeFile(path, AGENT_PREAMBLE + work + AGENT_EPILOGUE);
+  await chmod(path, 0o755);
+}
+
+const DEFAULT_WORK = `import subprocess
+def sh(*args):
+    subprocess.run(args, cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+if report == '/dev/null':
+    open(repo + '/result.txt', 'w').write('wrong\\n')
+    message = 'wrong first attempt'
+else:
+    evidence = open(report).read()
+    assert 'verifier exited with code 1' in evidence
+    assert 'expected correct' in evidence
+    open(repo + '/result.txt', 'w').write('correct\\n')
+    message = 'repair from evidence'
+sh('git', 'add', 'result.txt')
+sh('git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', message)
+`;
+
+async function fixture(): Promise<{
+  config: SupervisorConfig;
+  agent: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), "diriger-e2e-"));
   roots.push(root);
 
   const repository = join(root, "repo");
   const evidence = join(root, "evidence");
   const plan = join(root, "plan.md");
-  const recipe = join(root, "worker.yaml");
-  const goose = join(root, "fake-goose");
+  const prompt = join(root, "worker.md");
+  const agent = join(root, "fake-agent.py");
   const verifier = join(root, "verify");
 
   await mkdir(repository);
   await writeFile(join(repository, "README.md"), "baseline\n");
   await writeFile(plan, "Write the word correct to result.txt.\n");
-  await writeFile(recipe, "description: fake\n");
   await writeFile(
-    goose,
-    `#!/usr/bin/env bash
-set -euo pipefail
-repo=""
-report=""
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--params" ]]; then
-    case "$2" in
-      repository_path=*) repo="\${2#repository_path=}" ;;
-      failure_report_path=*) report="\${2#failure_report_path=}" ;;
-    esac
-    shift 2
-  else
-    shift
-  fi
-done
-if [[ "$report" == "/dev/null" ]]; then
-  printf 'wrong\\n' > "$repo/result.txt"
-  message="wrong first attempt"
-else
-  grep -q 'verifier exited with code 1' "$report"
-  grep -q 'expected correct' "$report"
-  printf 'correct\\n' > "$repo/result.txt"
-  message="repair from evidence"
-fi
-git -C "$repo" add result.txt
-git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -m "$message" >/dev/null
-printf '{"type":"complete","total_tokens":10,"input_tokens":8,"output_tokens":2,"cache_read_input_tokens":4}\\n'
-`,
+    prompt,
+    "{{ plan }}\nRepository: {{ repository_path }}\nPlan: {{ plan_path }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n",
   );
+  await writeAgent(agent, DEFAULT_WORK);
   await writeFile(
     verifier,
     `#!/usr/bin/env bash
@@ -90,7 +109,6 @@ else
 fi
 `,
   );
-  await chmod(goose, 0o755);
   await chmod(verifier, 0o755);
 
   git(repository, ["init", "-b", "main"]);
@@ -106,57 +124,63 @@ fi
   ]);
 
   return {
-    repositoryPath: repository,
-    planPath: plan,
-    stage: "1",
-    verifierPath: verifier,
-    workerRecipePath: recipe,
-    evidencePath: evidence,
-    gooseBin: goose,
-    maxAttempts: 2,
-    workerTimeoutMs: 5_000,
-    noToolTimeoutMs: 5_000,
-    noToolOutputBytes: 1_000_000,
-    runId: "fake-recovery",
+    config: {
+      repositoryPath: repository,
+      planPath: plan,
+      stage: "1",
+      verifierPath: verifier,
+      promptPath: prompt,
+      evidencePath: evidence,
+      acpCommand: ["python3", agent],
+      maxAttempts: 2,
+      workerTimeoutMs: 5_000,
+      noToolTimeoutMs: 5_000,
+      noToolOutputBytes: 1_000_000,
+      maxToolCalls: 100,
+      maxToolRepetitions: 8,
+      runId: "fake-recovery",
+    },
+    agent,
   };
 }
 
 describe("supervise", () => {
   for (const [name, change, reason] of [
-    ["orphan rewrite", "git checkout --orphan replacement", "rewrote history"],
+    ["orphan rewrite", "sh('git', 'checkout', '--orphan', 'replacement')", "rewrote history"],
     [
       "amended history",
-      "git commit --amend --no-edit --allow-empty",
+      "sh('git', 'commit', '--amend', '--no-edit', '--allow-empty')",
       "rewrote history",
     ],
     [
       "branch switch",
-      "git checkout -b replacement",
+      "sh('git', 'checkout', '-b', 'replacement')",
       "changed the checked-out branch",
     ],
     [
       "detached HEAD switch",
-      "git checkout --detach",
+      "sh('git', 'checkout', '--detach')",
       "changed the checked-out branch",
     ],
   ]) {
     test(`rejects ${name} without verification or a repair retry`, async () => {
-      const config = await fixture();
+      const { config, agent } = await fixture();
       git(config.repositoryPath, ["config", "user.name", "Test"]);
       git(config.repositoryPath, [
         "config",
         "user.email",
         "test@example.invalid",
       ]);
-      await writeFile(
-        config.gooseBin,
-        `#!/usr/bin/env bash
-set -eu
-printf 'correct\\n' > result.txt
-git add result.txt
+      await writeAgent(
+        agent,
+        `import subprocess
+def sh(*args):
+    subprocess.run(args, cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+open(repo + '/result.txt', 'w').write('correct\\n')
+sh('git', 'add', 'result.txt')
 ${change}
-git add .
-git commit --allow-empty -m replacement
+sh('git', 'add', '.')
+sh('git', 'commit', '--allow-empty', '-qm', 'replacement')
 `,
       );
       const record = await supervise(config);
@@ -170,14 +194,21 @@ git commit --allow-empty -m replacement
   }
 
   test("rejects a rewrite even when the worker exits nonzero", async () => {
-    const config = await fixture();
-    await writeFile(
-      config.gooseBin,
-      `#!/usr/bin/env bash
-set -eu
-git checkout --orphan replacement
-git -c user.name=Test -c user.email=test@example.invalid commit -m replacement
-exit 7
+    const { config, agent } = await fixture();
+    git(config.repositoryPath, ["config", "user.name", "Test"]);
+    git(config.repositoryPath, [
+      "config",
+      "user.email",
+      "test@example.invalid",
+    ]);
+    await writeAgent(
+      agent,
+      `import subprocess
+def sh(*args):
+    subprocess.run(args, cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+sh('git', 'checkout', '--orphan', 'replacement')
+sh('git', 'commit', '--allow-empty', '-qm', 'replacement')
+sys.exit(7)
 `,
     );
     const record = await supervise(config);
@@ -185,29 +216,30 @@ exit 7
     expect(record.attempts).toHaveLength(1);
     expect(record.attempts[0]?.worker.exitCode).toBe(7);
     expect(record.attempts[0]?.verification).toBeUndefined();
-  });
+  }, 15_000);
 
   test("rejects new merge commits even when they preserve ancestry", async () => {
-    const config = await fixture();
+    const { config, agent } = await fixture();
     git(config.repositoryPath, ["config", "user.name", "Test"]);
     git(config.repositoryPath, [
       "config",
       "user.email",
       "test@example.invalid",
     ]);
-    await writeFile(
-      config.gooseBin,
-      `#!/usr/bin/env bash
-set -eu
-git checkout -b side
-printf 'side' > side.txt
-git add .
-git commit -m side
-git checkout main
-printf 'correct\\n' > result.txt
-git add .
-git commit -m correct
-git merge --no-ff side -m merge
+    await writeAgent(
+      agent,
+      `import subprocess
+def sh(*args):
+    subprocess.run(args, cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+sh('git', 'checkout', '-b', 'side')
+open(repo + '/side.txt', 'w').write('side')
+sh('git', 'add', '.')
+sh('git', 'commit', '-qm', 'side')
+sh('git', 'checkout', 'main')
+open(repo + '/result.txt', 'w').write('correct\\n')
+sh('git', 'add', '.')
+sh('git', 'commit', '-qm', 'correct')
+sh('git', 'merge', '--no-ff', 'side', '-m', 'merge')
 `,
     );
     const record = await supervise(config);
@@ -220,7 +252,7 @@ git merge --no-ff side -m merge
   });
 
   test("passes verifier evidence into a fresh repair attempt", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     const record = await supervise(config);
 
     expect(record.status).toBe("accepted");
@@ -236,7 +268,7 @@ git merge --no-ff side -m merge
   }, 15_000);
 
   test("rejects a concurrent supervisor before it starts a worker", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     const first = supervise(config);
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
     await expect(
@@ -246,7 +278,7 @@ git merge --no-ff side -m merge
   }, 15_000);
 
   test("returns failed after the configured attempt limit", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     const record = await supervise({ ...config, maxAttempts: 1 });
 
     expect(record.status).toBe("failed");
@@ -255,7 +287,7 @@ git merge --no-ff side -m merge
   });
 
   test("the CLI exits nonzero after exhausted attempts", async () => {
-    const config = await fixture();
+    const { config, agent } = await fixture();
     const cli = new URL("../src/cli.ts", import.meta.url).pathname;
     const process = Bun.spawn(
       [
@@ -270,12 +302,12 @@ git merge --no-ff side -m merge
         config.stage,
         "--verifier",
         config.verifierPath,
-        "--worker-recipe",
-        config.workerRecipePath!,
+        "--acp-command",
+        JSON.stringify(["python3", agent]),
+        "--prompt",
+        config.promptPath,
         "--evidence",
         config.evidencePath,
-        "--goose",
-        config.gooseBin,
         "--max-attempts",
         "1",
         "--run-id",
@@ -294,7 +326,7 @@ git merge --no-ff side -m merge
     expect(await process.exited).toBe(1);
   });
   test("writes accepted exact-head proof reusable by reconciliation", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     const record = await supervise(config);
     const state = await readState(config.evidencePath);
     expect(record.status).toBe("accepted");
@@ -315,7 +347,7 @@ git merge --no-ff side -m merge
   }, 20_000);
 
   test("uses frozen verifier snapshot after original verifier changes", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     await supervise(config);
     await writeFile(config.verifierPath, "#!/usr/bin/env bash\nexit 99\n");
     await chmod(config.verifierPath, 0o755);
@@ -333,7 +365,7 @@ git merge --no-ff side -m merge
   }, 20_000);
 
   test("refuses an evidence path collision before worker launch", async () => {
-    const config = await fixture();
+    const { config } = await fixture();
     await mkdir(config.evidencePath);
     await expect(supervise(config)).rejects.toThrow(
       "evidence directory already exists",

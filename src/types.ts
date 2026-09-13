@@ -7,12 +7,10 @@ export interface SupervisorConfig {
   readonly verifierSelfContained?: boolean;
   readonly verifierDependencies?: ReadonlyArray<string>;
   readonly verifierSnapshotRoot?: string;
-  readonly workerRecipePath?: string;
+  readonly promptPath: string;
   /** Require a structured worker outcome report before a candidate can be accepted. */
   readonly workerReportRequired?: boolean;
   readonly evidencePath: string;
-  readonly gooseBin: string;
-  readonly workerKind?: "goose" | "acp";
   readonly acpCommand?: ReadonlyArray<string>;
   /** Runtime settings selected at run creation; supplied by the supervisor only. */
   readonly workerEnvironment?: NodeJS.ProcessEnv;
@@ -20,6 +18,8 @@ export interface SupervisorConfig {
   readonly workerTimeoutMs: number;
   readonly noToolTimeoutMs: number;
   readonly noToolOutputBytes: number;
+  readonly maxToolCalls: number;
+  readonly maxToolRepetitions: number;
   readonly runId: string;
 }
 
@@ -30,6 +30,7 @@ export type TerminationReason =
   | "protocol-error"
   | "permission-denied"
   | "output-limit"
+  | "tool-call-limit"
   | "missing-child-result";
 
 export interface Usage {
@@ -79,6 +80,8 @@ export interface AttemptRecord {
     /** Wrapper exit when processExitCode is unavailable. */
     readonly wrapperExitCode?: number;
     readonly cleanupComplete: boolean;
+    /** ACP tool-call session updates observed before the attempt ended. */
+    readonly toolCalls?: number;
     /** Present only when ACP ended for excessive tool-free generated text. */
     readonly watchdog?: {
       readonly toolProgressAgeMs: number;

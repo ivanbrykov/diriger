@@ -76,6 +76,8 @@ export interface State {
     readonly fingerprint: string;
     readonly config: Fingerprint;
     readonly plan: Fingerprint;
+    readonly prompt?: Fingerprint;
+    /** Legacy frozen worker recipe; read-only compatibility for old evidence. */
     readonly recipe?: Fingerprint;
     readonly profile?: Fingerprint;
     readonly verifier: VerifierManifest;
@@ -229,6 +231,7 @@ function assertState(v: unknown): asserts v is State {
     !fp(v.inputs.config) ||
     !fp(v.inputs.plan) ||
     (v.inputs.recipe !== undefined && !fp(v.inputs.recipe)) ||
+    (v.inputs.prompt !== undefined && !fp(v.inputs.prompt)) ||
     (v.inputs.profile !== undefined && !fp(v.inputs.profile)) ||
     !rec(v.inputs.verifier) ||
     !fp(v.inputs.verifier.entry) ||
@@ -315,6 +318,7 @@ export interface CreateOptions {
     selfContained?: boolean;
     snapshotRoot?: string;
   };
+  promptPath?: string;
   recipePath?: string;
   profilePath?: string;
   profile?: Json;
@@ -342,6 +346,9 @@ export async function createFrozenRun(o: CreateOptions): Promise<State> {
   await atomic(configPath, JSON.stringify(o.resolvedConfig, null, 2) + "\n");
   const config = await snap(o.evidencePath, configPath, "config.frozen.json"),
     plan = await snap(o.evidencePath, o.planPath, "plan.md"),
+    prompt = o.promptPath
+      ? await snap(o.evidencePath, o.promptPath, "prompt.md")
+      : undefined,
     recipe = o.recipePath
       ? await snap(o.evidencePath, o.recipePath, "worker.yaml")
       : undefined,
@@ -402,6 +409,7 @@ export async function createFrozenRun(o: CreateOptions): Promise<State> {
     bare = {
       config,
       plan,
+      ...(prompt ? { prompt } : {}),
       ...(recipe ? { recipe } : {}),
       ...(profile ? { profile } : {}),
       verifier,
@@ -457,6 +465,7 @@ export async function validateFrozenInputs(
   const files = [
     s.inputs.config,
     s.inputs.plan,
+    ...(s.inputs.prompt ? [s.inputs.prompt] : []),
     ...(s.inputs.recipe ? [s.inputs.recipe] : []),
     ...(s.inputs.profile ? [s.inputs.profile] : []),
     s.inputs.verifier.entry,

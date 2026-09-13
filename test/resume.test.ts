@@ -47,35 +47,48 @@ async function lines(path: string): Promise<string[]> {
 }
 
 async function fixture(maxAttempts = 2) {
-  const root = await mkdtemp(join(tmpdir(), "goose-resume-"));
+  const root = await mkdtemp(join(tmpdir(), "diriger-resume-"));
   roots.push(root);
   const repo = join(root, "repo"),
     evidence = join(root, "evidence"),
     plan = join(root, "plan.md"),
-    recipe = join(root, "worker.yaml");
-  const worker = join(root, "worker"),
+    prompt = join(root, "worker.md");
+  const worker = join(root, "worker.py"),
     verifier = join(root, "verifier"),
     workerMarker = join(root, "worker.calls"),
     verifierMarker = join(root, "verifier.calls");
   await mkdir(repo);
   await writeFile(join(repo, "README.md"), "base\n");
   await writeFile(plan, "make result\n");
-  await writeFile(recipe, "name: fake\n");
+  await writeFile(
+    prompt,
+    "{{ plan }}\nRepository: {{ repository_path }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n",
+  );
   await writeFile(
     worker,
-    `#!/usr/bin/env bash
-set -euo pipefail
-repo=""; report=""; while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--params" ]]; then
-    case "$2" in repository_path=*) repo="\${2#repository_path=}" ;; failure_report_path=*) report="\${2#failure_report_path=}" ;; esac
-    shift 2
-  else shift; fi
-done
-printf 'worker:%s\\n' "$report" >> "${workerMarker}"
-printf 'correct\\n' > "$repo/result.txt"
-git -C "$repo" add result.txt
-git -C "$repo" -c user.name=Test -c user.email=test@example.invalid commit -qm worker
-printf '{"type":"complete","total_tokens":1,"input_tokens":1,"output_tokens":0,"cache_read_input_tokens":0}\\n'
+    `#!/usr/bin/env python3
+import json, re, subprocess, sys
+def receive():
+    line = sys.stdin.readline()
+    if not line: sys.exit(1)
+    return json.loads(line)
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(',', ':')) + '\\n')
+    sys.stdout.flush()
+init = receive()
+send({'jsonrpc':'2.0','id':init['id'],'result':{'protocolVersion':1}})
+session = receive()
+repo = session['params']['cwd']
+send({'jsonrpc':'2.0','id':session['id'],'result':{'sessionId':'resume'}})
+prompt = receive()
+brief = '\\n'.join(part.get('text','') for part in prompt['params']['prompt'] if isinstance(part, dict))
+report = re.search(r'^Failure report: (\\S+)$', brief, re.M).group(1)
+open(${JSON.stringify(workerMarker)}, 'a').write('worker:%s\\n' % report)
+open(repo + '/result.txt', 'w').write('correct\\n')
+subprocess.run(['git', 'add', 'result.txt'], cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'worker'], cwd=repo, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+send({'jsonrpc':'2.0','id':prompt['id'],'result':{'stopReason':'end_turn'}})
+while sys.stdin.readline(): pass
 `,
   );
   await writeFile(
@@ -99,13 +112,15 @@ test "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = correct
     planPath: plan,
     stage: "resume",
     verifierPath: verifier,
-    workerRecipePath: recipe,
+    promptPath: prompt,
     evidencePath: evidence,
-    gooseBin: worker,
+    acpCommand: ["python3", worker],
     maxAttempts,
     workerTimeoutMs: 5_000,
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 100_000,
+    maxToolCalls: 100,
+    maxToolRepetitions: 8,
     runId: "resume-case",
   };
   return {
@@ -113,7 +128,7 @@ test "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = correct
     repo,
     evidence,
     plan,
-    recipe,
+    prompt,
     worker,
     verifier,
     workerMarker,
@@ -153,7 +168,7 @@ async function frozen(
     resolvedConfig: f.config as unknown as import("../src/state.js").Json,
     initial: { head, ref, worktree: f.repo },
     planPath: f.plan,
-    recipePath: f.recipe,
+    promptPath: f.prompt,
     ...(profile === undefined
       ? {}
       : { profile: profile as import("../src/state.js").Json }),

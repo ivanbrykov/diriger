@@ -13,7 +13,7 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "worker-profile-"));
   const bin = join(root, "bin");
   await mkdir(bin);
-  const agent = join(bin, "goose");
+  const agent = join(bin, "agent");
   await writeFile(agent, "#!/bin/sh\nexit 0\n");
   await chmod(agent, 0o755);
   const config: SupervisorConfig = {
@@ -21,13 +21,15 @@ async function fixture() {
     planPath: join(root, "plan"),
     stage: "x",
     verifierPath: join(root, "verify"),
-    workerRecipePath: join(root, "recipe"),
+    promptPath: join(root, "prompt.md"),
     evidencePath: join(root, "evidence"),
-    gooseBin: "goose",
+    acpCommand: ["agent"],
     maxAttempts: 1,
     workerTimeoutMs: 1,
     noToolTimeoutMs: 1,
     noToolOutputBytes: 1,
+    maxToolCalls: 100,
+    maxToolRepetitions: 8,
     runId: "profile",
   };
   return { root, bin, agent, config };
@@ -39,8 +41,8 @@ test("rejects PATH executable substitution and executable content drift", async 
     const profile = await captureWorkerProfile(f.config, env);
     const other = join(f.root, "other");
     await mkdir(other);
-    await writeFile(join(other, "goose"), "#!/bin/sh\nexit 1\n");
-    await chmod(join(other, "goose"), 0o755);
+    await writeFile(join(other, "agent"), "#!/bin/sh\nexit 1\n");
+    await chmod(join(other, "agent"), 0o755);
     await expect(
       validateWorkerProfile(profile, f.config, { ...env, PATH: other }),
     ).rejects.toThrow("worker runtime profile drift");
@@ -88,7 +90,6 @@ test("rejects a changed ACP adapter script named in argv", async () => {
     await writeFile(script, "console.log('one')\n");
     const config = {
       ...f.config,
-      workerKind: "acp" as const,
       acpCommand: [f.agent, script],
     };
     const profile = await captureWorkerProfile(config, { PATH: f.bin });

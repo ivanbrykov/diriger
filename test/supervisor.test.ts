@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { parseConfig } from "../src/cli.js";
 import { encodedBytes, runObservedProcess } from "../src/process.js";
 import { boundedFailureOutput } from "../src/supervisor.js";
@@ -15,8 +16,8 @@ describe("parseConfig", () => {
       "2",
       "--verifier",
       "/tmp/verify",
-      "--worker-recipe",
-      "/tmp/worker.yaml",
+      "--acp-command",
+      '["agent","--stdio"]',
       "--evidence",
       "/tmp/evidence",
       "--max-attempts",
@@ -29,9 +30,11 @@ describe("parseConfig", () => {
     expect(config.maxAttempts).toBe(3);
     expect(config.runId).toBe("ledger-test");
     expect(config.workerTimeoutMs).toBe(1_800_000);
+    expect(config.maxToolCalls).toBe(100);
+    expect(config.maxToolRepetitions).toBe(8);
   });
 
-  test("parses ACP JSON argv without requiring a legacy recipe", () => {
+  test("parses the prompt template and tool-call budgets", () => {
     const config = parseConfig([
       "run",
       "--repo",
@@ -42,15 +45,59 @@ describe("parseConfig", () => {
       "1",
       "--verifier",
       "/tmp/verify",
+      "--acp-command",
+      '["agent"]',
       "--evidence",
       "/tmp/evidence",
-      "--worker-kind",
-      "acp",
-      "--acp-command",
-      '["agent","--stdio"]',
+      "--prompt",
+      "/tmp/worker-prompt.md",
+      "--max-tool-calls",
+      "25",
+      "--max-tool-repetitions",
+      "3",
     ]);
-    expect(config.acpCommand).toEqual(["agent", "--stdio"]);
-    expect(config.workerRecipePath).toBeUndefined();
+    expect(config.promptPath).toBe("/tmp/worker-prompt.md");
+    expect(config.maxToolCalls).toBe(25);
+    expect(config.maxToolRepetitions).toBe(3);
+  });
+
+  test("defaults the prompt template to the bundled worker prompt", () => {
+    const config = parseConfig([
+      "run",
+      "--repo",
+      "/tmp/repo",
+      "--plan",
+      "/tmp/plan.md",
+      "--stage",
+      "1",
+      "--verifier",
+      "/tmp/verify",
+      "--acp-command",
+      '["agent"]',
+      "--evidence",
+      "/tmp/evidence",
+    ]);
+    expect(config.promptPath).toBe(
+      resolve(import.meta.dir, "..", "prompts", "worker.md"),
+    );
+  });
+
+  test("requires an ACP command", () => {
+    expect(() =>
+      parseConfig([
+        "run",
+        "--repo",
+        "/tmp/repo",
+        "--plan",
+        "/tmp/plan.md",
+        "--stage",
+        "1",
+        "--verifier",
+        "/tmp/verify",
+        "--evidence",
+        "/tmp/evidence",
+      ]),
+    ).toThrow("missing --acp-command");
   });
 
   test("rejects invalid ACP argv", () => {
@@ -67,8 +114,6 @@ describe("parseConfig", () => {
         "/tmp/verify",
         "--evidence",
         "/tmp/evidence",
-        "--worker-kind",
-        "acp",
         "--acp-command",
         '["agent",""]',
       ]),
@@ -87,8 +132,8 @@ describe("parseConfig", () => {
         "1",
         "--verifier",
         "/tmp/verify",
-        "--worker-recipe",
-        "/tmp/worker.yaml",
+        "--acp-command",
+        '["agent"]',
         "--evidence",
         "/tmp/evidence",
         "--max-attempts",

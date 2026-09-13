@@ -1,7 +1,7 @@
 # Diriger
 
 Diriger is a deterministic, single-stage controller for bounded coding
-work. It runs one fresh legacy Goose or ACP worker at a time against a
+work. It runs one fresh ACP worker at a time against a
 caller-provided Git worktree, accepts work only through Git invariants and an
 independent verifier, and records durable evidence outside that worktree.
 
@@ -12,9 +12,8 @@ worktree and a **new** external evidence directory for each run.
 ## CLI
 
 The installed command is `diriger`. From a source checkout, use
-`bun src/cli.ts` in its place. `goose-supervisor` remains a compatibility alias.
-Existing evidence and internal ownership lock names remain compatible with
-earlier releases. Goose-specific options still configure the Goose adapter.
+`bun src/cli.ts` in its place. Existing evidence and internal ownership lock
+names remain compatible with earlier releases.
 
 ## Run a stage
 
@@ -27,36 +26,46 @@ diriger run \
   --plan /absolute/path/to/plan.md \
   --stage 1 \
   --verifier /absolute/path/to/verify-stage.sh \
-  --worker-recipe /absolute/path/to/worker.yaml \
-  --evidence /absolute/path/to/new-evidence-directory
-```
-
-Legacy Goose is the default worker. It receives `repository_path`, `plan_path`,
-`stage`, `attempt`, and `failure_report_path` parameters. Set `--goose PATH`
-to select its executable. A repair receives the prior durable failure report;
-the first attempt receives `/dev/null`.
-
-Use ACP with an explicit stdio argv array:
-
-```bash
-diriger run \
-  --repo /absolute/path/to/repository \
-  --plan /absolute/path/to/plan.md \
-  --stage 1 \
-  --verifier /absolute/path/to/verify-stage.sh \
-  --worker-kind acp \
   --acp-command '["/absolute/path/to/acp-agent", "serve"]' \
   --evidence /absolute/path/to/new-evidence-directory
 ```
 
-Both modes accept `--max-attempts`, `--worker-timeout-seconds`,
-`--no-tool-timeout-seconds`, `--no-tool-output-bytes`, and `--run-id`.
-The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
+The worker is any agent speaking ACP over stdio; `--acp-command` is its argv
+as a nonempty JSON array and is required.
+
+Also accepted: `--prompt`, `--worker-report`, `--max-attempts`,
+`--worker-timeout-seconds`, `--no-tool-timeout-seconds`,
+`--no-tool-output-bytes`, `--max-tool-calls`, `--max-tool-repetitions`, and
+`--run-id`. The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
+
+## Worker prompt template
+
+The worker receives a single prompt rendered from a template. The default is
+the bundled `prompts/worker.md`; select another file with `--prompt PATH`.
+Templates substitute `{{ name }}` tokens; unknown or leftover tokens are
+errors. The variables are:
+
+- `plan`: content of the frozen plan file.
+- `repository_path`: absolute path of the implementation repository.
+- `plan_path`: absolute path of the frozen plan snapshot.
+- `stage`: stage identifier.
+- `attempt`: one-based supervisor attempt number.
+- `failure_report_path`: the prior durable failure report, or `/dev/null` on
+  the first attempt.
+- `worker_report_path`: supervisor-owned report output path, or empty when
+  structured outcomes are not required.
+- `worker_judgment`: the worker judgment and structured-report contract, or
+  empty when structured outcomes are not required.
+
+Runaway control is deterministic rather than prompt-based: an attempt ends
+with `tool-call-limit` when its ACP tool calls exceed `--max-tool-calls`
+(default 100) or when the same tool call (kind, title, and input) repeats
+consecutively beyond `--max-tool-repetitions` (default 8).
 
 ## Worker judgment and structured outcomes
 
-New CLI runs require a worker report by default. The supplied ACP brief and bundled
-Goose recipe instruct the worker to prefer established platform/framework features,
+New CLI runs require a worker report by default. The bundled worker prompt
+template instructs the worker to prefer established platform/framework features,
 then focused maintained libraries; challenge implementation suggestions with evidence;
 and disclose known gaps even when prescribed tests pass. Explicit constraints and
 scope still apply. The investigation allowance is at most five minutes or one quarter
@@ -112,11 +121,12 @@ Missing or invalid required reports cannot be accepted. Recovery must preserve t
 gate, including when a crash interrupts finalization. Existing frozen runs retain their
 original reporting policy; do not edit their inputs to change it.
 
-For an existing custom recipe that does not support the contract, explicitly select
-`--worker-report optional` to retain legacy acceptance. That mode does not provide the
-report gate. Custom recipes used with required reporting must accept and follow
-`worker_report_path` and `worker_judgment` parameters. Programmatic `supervise()` callers
-opt in with `workerReportRequired: true`; omitted fields preserve compatibility with
+For an existing custom prompt template that does not support the contract,
+explicitly select `--worker-report optional` to retain legacy acceptance. That
+mode does not provide the report gate. Custom templates used with required
+reporting must consume the `worker_report_path` and `worker_judgment`
+variables. Programmatic `supervise()` callers opt in with
+`workerReportRequired: true`; omitted fields preserve compatibility with
 existing callers and evidence.
 
 ## Freeze the verifier closure
@@ -142,14 +152,15 @@ diriger run ... \
   --verifier-manifest /absolute/path/to/config/verifier-manifest.json
 ```
 
-The controller freezes the resolved configuration, plan, worker recipe, worker
-runtime profile, verifier entry, and declared verifier dependencies. It hashes
+The controller freezes the resolved configuration, plan, worker prompt
+template, worker runtime profile, verifier entry, and declared verifier
+dependencies. It hashes
 all frozen inputs and immutable attempt artifacts before status or resume work.
 A changed frozen input, proof, or summary blocks recovery.
 
 The runtime profile is captured automatically for each new run; it is not a
 CLI option. `inputs/worker-profile.json` and the state profile fingerprint pin
-the resolved Goose/ACP executable, full ACP argv, and identities of ACP argv
+the resolved ACP executable, full ACP argv, and identities of ACP argv
 files such as adapter scripts. It captures selected non-secret model settings
 and OpenAI route controls (`OPENAI_HOST`, `OPENAI_BASE_PATH`,
 `OPENAI_BASE_URL`, `API_VERSION`, and `OPENAI_API_VERSION`), including whether each route
@@ -231,7 +242,7 @@ watchdog requires **both** `--no-tool-timeout-seconds` since the last tool event
 and `--no-tool-output-bytes` generated since that event. For ACP, the byte budget
 counts decoded UTF-8 text in thought/message chunks, excluding JSON framing,
 metadata, and tool output. Splitting the same text into many token-sized frames
-does not consume extra budget. Legacy Goose retains its raw stdout byte budget.
+does not consume extra budget.
 
 This is a generation budget, not a silence timeout: meaningful thought/message
 activity is tracked separately from tool progress for diagnostics. It does not
@@ -240,7 +251,7 @@ remain bounded by the hard worker wall timeout; no short inactivity cutoff is
 introduced. ACP generation-budget failures include a bounded watchdog snapshot to explain
 the generated-text count, wire bytes, and elapsed activity/tool times.
 
-Legacy worker logs are capped at 64 MiB per stream and incomplete lines at 1 MiB; an
+Worker ACP streams are capped at 64 MiB each and individual frames at 1 MiB; an
 overflow terminates the owned group. Verifier streams are capped at 8 MiB each;
 an overflow is drained, recorded as a verifier failure, and only bounded output
 is retained. The verifier wall-time limit is ten minutes. Failure reports keep

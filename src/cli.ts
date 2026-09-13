@@ -9,7 +9,7 @@ import type { SupervisorConfig } from "./types.js";
 
 const USAGE = [
   "Usage:",
-  "  diriger run --repo PATH --plan PATH --stage ID --verifier PATH --evidence PATH",
+  "  diriger run --repo PATH --plan PATH --stage ID --verifier PATH --evidence PATH --acp-command JSON_ARGV",
   "  diriger status --evidence PATH [--json]",
   "  diriger recover --evidence PATH [--apply] [--json]",
   "  diriger resume --evidence PATH [--json]",
@@ -17,15 +17,15 @@ const USAGE = [
   "Status exits: 0 ready/accepted/preview; 1 terminal; 2 invalid input/state; 3 ownership unsafe; 4 task blocked",
   "",
   "Options:",
-  "  --worker-recipe PATH            Required for Goose workers",
+  "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array (required)",
+  "  --prompt PATH                   Worker prompt template (default: bundled prompts/worker.md)",
   "  --worker-report required|optional  Structured worker outcome requirement (default: required)",
-  "  --goose PATH                    Goose executable (default: goose)",
-  "  --worker-kind goose|acp         Attempt adapter (default: goose)",
-  "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array",
   "  --max-attempts N                Fresh worker attempts (default: 2)",
   "  --worker-timeout-seconds N      Per-worker wall timeout (default: 1800)",
   "  --no-tool-timeout-seconds N     Tool-free time gate for generation budget (default: 90)",
-  "  --no-tool-output-bytes N        ACP text / legacy stdout bytes since tool (default: 262144)",
+  "  --no-tool-output-bytes N        ACP text bytes since tool (default: 262144)",
+  "  --max-tool-calls N              ACP tool-call budget per attempt (default: 100)",
+  "  --max-tool-repetitions N        Consecutive identical tool-call budget (default: 8)",
   "  --run-id ID                     Evidence/session prefix (default: timestamp)",
   "  --verifier-manifest PATH        JSON verifier dependency closure",
 ].join("\n");
@@ -77,10 +77,8 @@ function positiveInteger(
   return value;
 }
 
-function workerKind(values: Map<string, string>): "goose" | "acp" {
-  const value = values.get("worker-kind");
-  if (value === "goose" || value === "acp") return value;
-  throw new Error("--worker-kind must be goose or acp");
+function defaultPromptPath(): string {
+  return resolve(import.meta.dir, "..", "prompts", "worker.md");
 }
 
 function parseAcpCommand(raw: string): ReadonlyArray<string> {
@@ -183,15 +181,7 @@ async function durableStatus(
 export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
   if (args[0] !== "run") throw new Error(USAGE);
   const values = readFlags(args.slice(1));
-  const kind =
-    values.get("worker-kind") === undefined ? "goose" : workerKind(values);
-  const acpCommand =
-    values.get("acp-command") === undefined
-      ? undefined
-      : parseAcpCommand(values.get("acp-command")!);
-  if (kind === "acp" && acpCommand === undefined) {
-    throw new Error("--worker-kind acp requires --acp-command");
-  }
+  const acpCommand = parseAcpCommand(required(values, "acp-command"));
   const reportMode = values.get("worker-report") ?? "required";
   if (reportMode !== "required" && reportMode !== "optional")
     throw new Error("--worker-report must be required or optional");
@@ -204,13 +194,9 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
     planPath: resolve(required(values, "plan")),
     stage: required(values, "stage"),
     verifierPath: resolve(required(values, "verifier")),
-    ...(kind === "acp" && values.get("worker-recipe") === undefined
-      ? {}
-      : { workerRecipePath: resolve(required(values, "worker-recipe")) }),
+    promptPath: resolve(values.get("prompt") ?? defaultPromptPath()),
     evidencePath: resolve(required(values, "evidence")),
-    gooseBin: values.get("goose") ?? "goose",
-    ...(kind === "goose" ? {} : { workerKind: kind }),
-    ...(acpCommand === undefined ? {} : { acpCommand }),
+    acpCommand,
     workerReportRequired: reportMode === "required",
     maxAttempts: positiveInteger(values, "max-attempts", 2),
     workerTimeoutMs:
@@ -218,6 +204,8 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
     noToolTimeoutMs:
       positiveInteger(values, "no-tool-timeout-seconds", 90) * 1_000,
     noToolOutputBytes: positiveInteger(values, "no-tool-output-bytes", 262_144),
+    maxToolCalls: positiveInteger(values, "max-tool-calls", 100),
+    maxToolRepetitions: positiveInteger(values, "max-tool-repetitions", 8),
     runId: values.get("run-id") ?? "diriger-" + timestamp,
   };
 }

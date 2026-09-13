@@ -1,7 +1,7 @@
 import { investigationSeconds, workerJudgmentInstructions } from "./worker-report.js";
+import { renderPrompt } from "./prompt.js";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { runObservedProcess } from "./process.js";
 import {
   launchGuarded,
   MissingGuardedChildResultError,
@@ -36,6 +36,8 @@ export interface AttemptProtocol {
   processExitUnavailable?: boolean;
   wrapperExitCode?: number;
   cleanupComplete: boolean;
+  /** ACP tool-call session updates observed before the attempt ended. */
+  toolCalls?: number;
   /** Present only when the ACP tool-free generation watchdog fired. */
   watchdog?: {
     readonly toolProgressAgeMs: number;
@@ -69,75 +71,6 @@ export interface AttemptExecutorInput {
 }
 export interface AttemptExecutor {
   execute(input: AttemptExecutorInput): Promise<AttemptExecution>;
-}
-
-export class LegacyGooseAttemptExecutor implements AttemptExecutor {
-  async execute(input: AttemptExecutorInput): Promise<AttemptExecution> {
-    const { config, attempt, failureReportPath, prefix } = input;
-    await input.onLifecycle?.("prompt_in_flight");
-    if (config.workerRecipePath === undefined)
-      throw new Error("Goose worker requires --worker-recipe");
-    const command = [
-      config.gooseBin,
-      "run",
-      "--recipe",
-      config.workerRecipePath,
-      "--params",
-      "repository_path=" + config.repositoryPath,
-      "--params",
-      "plan_path=" + config.planPath,
-      "--params",
-      "stage=" + config.stage,
-      "--params",
-      "attempt=" + attempt,
-      "--params",
-      "failure_report_path=" + failureReportPath,
-      "--name",
-      config.runId + "-stage-" + config.stage + "-attempt-" + attempt,
-      "--output-format",
-      "stream-json",
-      "--max-turns",
-      "100",
-      "--max-tool-repetitions",
-      "8",
-    ];
-    if (input.workerReportPath !== undefined) {
-      command.push(
-        "--params", "worker_report_path=" + input.workerReportPath,
-        "--params", "worker_judgment=" + workerJudgmentInstructions(
-          input.workerReportPath, investigationSeconds(config.workerTimeoutMs),
-        ),
-      );
-    }
-    const guarded =
-      input.guardedLaunch === undefined
-        ? undefined
-        : await input.guardedLaunch(command, prefix + "-guard", async () => {
-            await input.onLifecycle?.("prompt_in_flight");
-          });
-    const result = await runObservedProcess({
-      command: command,
-      ...(guarded === undefined ? {} : { guardedLaunch: guarded }),
-      cwd: config.repositoryPath,
-      env: config.workerEnvironment ?? process.env,
-      stdoutPath: prefix + "-worker.stream.jsonl",
-      stderrPath: prefix + "-worker.stderr.log",
-      timeoutMs: config.workerTimeoutMs,
-      noToolTimeoutMs: config.noToolTimeoutMs,
-      noToolOutputBytes: config.noToolOutputBytes,
-      onTool: (tool) =>
-        console.log(
-          "[stage " +
-            config.stage +
-            " attempt " +
-            attempt +
-            "] worker.tool " +
-            tool,
-        ),
-    });
-    await input.onLifecycle?.("cleanup_complete");
-    return { worker: result };
-  }
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -261,6 +194,9 @@ export class AcpAttemptExecutor implements AttemptExecutor {
       toolFreeTextBytes = 0,
       toolFreeWireBytes = 0,
       promptInFlight = false;
+    let toolCalls = 0,
+      toolRepetitions = 0,
+      lastToolCall: string | undefined;
     let watchdogSnapshot: AttemptProtocol["watchdog"] | undefined;
     const lifecycle = async (state: AttemptLifecycle) => {
       await onLifecycle?.(state);
@@ -387,6 +323,30 @@ export class AcpAttemptExecutor implements AttemptExecutor {
             lastMeaningfulActivityAt = lastToolAt;
             toolFreeTextBytes = 0;
             toolFreeWireBytes = 0;
+            if (kind === "tool_call") {
+              toolCalls += 1;
+              const identity = JSON.stringify([
+                update.kind ?? null,
+                update.title ?? null,
+                update.rawInput ?? null,
+              ]);
+              toolRepetitions =
+                identity === lastToolCall ? toolRepetitions + 1 : 1;
+              lastToolCall = identity;
+              if (toolCalls > config.maxToolCalls) {
+                fail(
+                  "ACP tool-call budget exceeded",
+                  "tool-call-limit",
+                );
+                void cleanup("tool-call-limit").catch(() => {});
+              } else if (toolRepetitions > config.maxToolRepetitions) {
+                fail(
+                  "ACP repeated an identical tool call beyond its budget",
+                  "tool-call-limit",
+                );
+                void cleanup("tool-call-limit").catch(() => {});
+              }
+            }
             return;
           }
           const bytes = textBytes(update);
@@ -515,21 +475,23 @@ export class AcpAttemptExecutor implements AttemptExecutor {
       sessionId = session.sessionId;
       await lifecycle("session_ready");
       const plan = await Bun.file(config.planPath).text();
-      const brief = [
+      const template = await Bun.file(config.promptPath).text();
+      const brief = renderPrompt(template, {
         plan,
-        "",
-        "Execution contract:",
-        "Work only in the supplied repository. Read repository instructions and the failure report.",
-        "Do not delegate work to subagents or start additional mutating workers.",
-        "Implement and test the requested stage, then leave a clean new descendant commit on the checked-out branch.",
-        "Stage: " + config.stage,
-        "Attempt: " + attempt,
-        "Failure report: " + failureReportPath,
-        ...(input.workerReportPath === undefined ? [] : [
-          "",
-          workerJudgmentInstructions(input.workerReportPath, investigationSeconds(config.workerTimeoutMs)),
-        ]),
-      ].join("\n");
+        repository_path: config.repositoryPath,
+        plan_path: config.planPath,
+        stage: config.stage,
+        attempt: String(attempt),
+        failure_report_path: failureReportPath,
+        worker_report_path: input.workerReportPath ?? "",
+        worker_judgment:
+          input.workerReportPath === undefined
+            ? ""
+            : workerJudgmentInstructions(
+                input.workerReportPath,
+                investigationSeconds(config.workerTimeoutMs),
+              ),
+      });
       await lifecycle("prompt_in_flight");
       lastToolAt = Date.now();
       lastMeaningfulActivityAt = lastToolAt;
@@ -597,6 +559,7 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         ...(processExitCode === null ? { processExitUnavailable: true } : {}),
         ...(wrapperExitCode === undefined ? {} : { wrapperExitCode }),
         cleanupComplete,
+        ...(toolCalls === 0 ? {} : { toolCalls }),
         ...(protocolVersion === undefined ? {} : { protocolVersion }),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(stopReason === undefined ? {} : { stopReason }),
@@ -606,9 +569,4 @@ export class AcpAttemptExecutor implements AttemptExecutor {
       },
     };
   }
-}
-export function executorFor(config: SupervisorConfig): AttemptExecutor {
-  return config.workerKind === "acp"
-    ? new AcpAttemptExecutor()
-    : new LegacyGooseAttemptExecutor();
 }

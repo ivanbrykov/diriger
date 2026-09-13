@@ -17,11 +17,16 @@ async function run(
   timeout = 200,
   lifecycle: string[] = [],
   watchdog = { timeoutMs: 200, textBytes: 256 },
+  limits = { maxToolCalls: 100, maxToolRepetitions: 8 },
 ) {
   const root = await mkdtemp(join(tmpdir(), "acp-"));
   roots.push(root);
   const agent = join(root, "agent");
   await writeFile(join(root, "plan"), "do it");
+  await writeFile(
+    join(root, "prompt.md"),
+    "{{ plan }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nRepository: {{ repository_path }}\nPlan: {{ plan_path }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n",
+  );
   await writeFile(agent, "#!/usr/bin/env bash\n" + body);
   await chmod(agent, 0o755);
   return new AcpAttemptExecutor().execute({
@@ -30,12 +35,14 @@ async function run(
       planPath: join(root, "plan"),
       stage: "1",
       verifierPath: join(root, "plan"),
+      promptPath: join(root, "prompt.md"),
       evidencePath: root,
-      gooseBin: "goose",
       acpCommand: [agent],
       workerTimeoutMs: timeout,
       noToolTimeoutMs: watchdog.timeoutMs,
       noToolOutputBytes: watchdog.textBytes,
+      maxToolCalls: limits.maxToolCalls,
+      maxToolRepetitions: limits.maxToolRepetitions,
       maxAttempts: 1,
       runId: "t",
     },
@@ -95,6 +102,7 @@ test("lifecycle failures still terminate the peer", async () => {
   roots.push(root);
   const agent = join(root, "agent");
   await writeFile(join(root, "plan"), "do it");
+  await writeFile(join(root, "prompt.md"), "{{ plan }}\n{{ worker_judgment }}\n");
   await writeFile(agent, "#!/usr/bin/env bash\n" + good);
   await chmod(agent, 0o755);
   const r = await new AcpAttemptExecutor().execute({
@@ -103,12 +111,14 @@ test("lifecycle failures still terminate the peer", async () => {
       planPath: join(root, "plan"),
       stage: "1",
       verifierPath: join(root, "plan"),
+      promptPath: join(root, "prompt.md"),
       evidencePath: root,
-      gooseBin: "goose",
       acpCommand: [agent],
       workerTimeoutMs: 5_000,
       noToolTimeoutMs: 1,
       noToolOutputBytes: 1,
+      maxToolCalls: 100,
+      maxToolRepetitions: 8,
       maxAttempts: 1,
       runId: "t",
     },
@@ -169,6 +179,21 @@ const toolUpdateFrame = JSON.stringify({
   method: "session/update",
   params: { sessionId: "s", update: { sessionUpdate: "tool_call_update" } },
 });
+function toolCallFrame(title: string, rawInput: unknown): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call",
+        kind: "execute",
+        title,
+        rawInput,
+      },
+    },
+  });
+}
 const endTurnFrame = JSON.stringify({
   jsonrpc: "2.0",
   id: 3,
@@ -206,6 +231,37 @@ test("tool-call updates keep the prompt alive until end_turn", async () => {
   expect(r.worker.terminationReason).toBeUndefined();
   expect(r.worker.exitCode).toBe(0);
 }, 10_000);
+
+test("tool calls beyond the attempt budget terminate with tool-call-limit", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${toolCallFrame("read", { path: "a" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "b" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "c" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "d" })}'; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 3,
+    maxToolRepetitions: 8,
+  });
+  expect(r.worker.terminationReason).toBe("tool-call-limit");
+  expect(r.protocol?.error).toContain("tool-call budget");
+  expect(r.protocol?.toolCalls).toBe(4);
+}, 5_000);
+
+test("consecutive identical tool calls terminate with tool-call-limit", async () => {
+  const repeated = toolCallFrame("edit", { path: "a", text: "x" });
+  const distinct = toolCallFrame("edit", { path: "a", text: "y" });
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${distinct}'; echo '${repeated}'; echo '${repeated}'; echo '${repeated}'; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 100,
+    maxToolRepetitions: 2,
+  });
+  expect(r.worker.terminationReason).toBe("tool-call-limit");
+  expect(r.protocol?.error).toContain("repeated an identical tool call");
+  expect(r.protocol?.toolCalls).toBe(4);
+}, 5_000);
 
 test("fragmented thought frames use decoded text bytes instead of wire framing", async () => {
   const thought = updateFrame("agent_thought_chunk", { type: "text", text: "x" });
@@ -272,6 +328,7 @@ test("guarded ACP end_turn survives TERM-resistant peer missing its durable exit
   roots.push(root);
   const agent = join(root, "agent");
   await writeFile(join(root, "plan"), "do it");
+  await writeFile(join(root, "prompt.md"), "{{ plan }}\n{{ worker_judgment }}\n");
   await writeFile(
     agent,
     "#!/usr/bin/env bash\n" +
@@ -288,12 +345,14 @@ test("guarded ACP end_turn survives TERM-resistant peer missing its durable exit
         planPath: join(root, "plan"),
         stage: "1",
         verifierPath: join(root, "plan"),
+        promptPath: join(root, "prompt.md"),
         evidencePath: root,
-        gooseBin: "goose",
         acpCommand: [agent],
         workerTimeoutMs: 5_000,
         noToolTimeoutMs: 1,
         noToolOutputBytes: 1,
+        maxToolCalls: 100,
+        maxToolRepetitions: 8,
         maxAttempts: 1,
         runId: "t",
       },
