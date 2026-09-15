@@ -1,11 +1,18 @@
 # OMP local ACP trial profile
 
-**Qualification status (2026-09-15): not promoted to default.** A supervised coding
-task, revised exact-retention test across two compactions, and cancellation passed.
-Injected context-error recovery was inconsistent: one probe compacted/continued but
-timed out, another returned `end_turn` with no compaction or result. Use explicitly
-for bounded trials with independent verification; this is not a proven cure for all
-Goose context failures.
+**Deployment decision (2026-09-15): experimental default on inverno, explicitly
+approved by the user.** Supervised coding, revised exact retention, cancellation,
+and genuine provider-overflow recovery passed. A real172510-token request exceeded
+the163840 limit; OMP compacted, retried and answered correctly. Earlier injected
+error recovery was inconsistent; terminal error text plus `end_turn` remains a
+known concern. Adoption accepts this uncertainty and retains independent checks.
+
+The inverno machine launcher supplies OMP for new `diriger run` calls without
+`--acp-command`; explicit workers are respected. Installed profile: `diriger-omp182`.
+Its pinned argv and decision record are in
+`/data/work/releases/diriger-config/20260915-omp/`. The repository CLI remains
+harness-neutral and requires explicit `--acp-command`. Task launchers should export
+`OMP_PROFILE=diriger-omp182` for new runs and their later resumes.
 
 These files target **OMP 18.2.0** and the local `inverno-local/qwen3.8-27b` profile.
 They are templates, not credentials or an installer. The example API key `local`
