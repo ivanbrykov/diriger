@@ -131,6 +131,12 @@ function textBytes(update: Record<string, unknown>): number {
   return new TextEncoder().encode(content.text).byteLength;
 }
 
+function terminationForStopReason(
+  stopReason: string,
+): TerminationReason | undefined {
+  return stopReason === "max_tokens" ? "generation-limit" : undefined;
+}
+
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -507,7 +513,10 @@ export class AcpAttemptExecutor implements AttemptExecutor {
       stopReason = prompt.stopReason;
       promptInFlight = false;
       await lifecycle("prompt_finished");
-      if (stopReason !== "end_turn")
+      const termination = terminationForStopReason(stopReason);
+      if (termination !== undefined)
+        fail("ACP prompt stopped: " + stopReason, termination);
+      else if (stopReason !== "end_turn")
         throw new Error("ACP prompt stopped: " + stopReason);
     } catch (error) {
       fail(

@@ -28,6 +28,7 @@ export type TerminationReason =
   | "no-tool-progress"
   | "spawn-error"
   | "protocol-error"
+  | "generation-limit"
   | "permission-denied"
   | "output-limit"
   | "tool-call-limit"

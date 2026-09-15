@@ -18,6 +18,7 @@ async function run(
   lifecycle: string[] = [],
   watchdog = { timeoutMs: 200, textBytes: 256 },
   limits = { maxToolCalls: 100, maxToolRepetitions: 8 },
+  lifecycleFailure?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), "acp-"));
   roots.push(root);
@@ -51,6 +52,7 @@ async function run(
     prefix: join(root, "a"),
     onLifecycle: async (state) => {
       lifecycle.push(state);
+      if (state === lifecycleFailure) throw new Error("checkpoint unavailable");
     },
   });
 }
@@ -199,6 +201,39 @@ const endTurnFrame = JSON.stringify({
   id: 3,
   result: { stopReason: "end_turn" },
 });
+const maxTokensFrame = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 3,
+  result: { stopReason: "max_tokens" },
+});
+test("max_tokens is a generation limit rather than a protocol error", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${maxTokensFrame}'; sleep 5`;
+  const r = await run(body, 5_000);
+  expect(r.worker.exitCode).toBe(143);
+  expect(r.worker.terminationReason).toBe("generation-limit");
+  expect(r.protocol?.stopReason).toBe("max_tokens");
+  expect(r.protocol?.cleanupComplete).toBeTrue();
+}, 10_000);
+
+test("a prior ACP failure is not overwritten by max_tokens", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${maxTokensFrame}'; sleep 5`;
+  const r = await run(
+    body,
+    5_000,
+    [],
+    { timeoutMs: 200, textBytes: 256 },
+    { maxToolCalls: 100, maxToolRepetitions: 8 },
+    "prompt_finished",
+  );
+  expect(r.worker.terminationReason).toBe("protocol-error");
+  expect(r.protocol?.stopReason).toBe("max_tokens");
+  expect(r.protocol?.error).toContain("checkpoint unavailable");
+}, 10_000);
+
 test("tool-free semantic text eventually terminates without resetting its budget", async () => {
   const body =
     "read a; echo '" +

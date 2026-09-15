@@ -1,0 +1,42 @@
+# Conservative qualification profile for OMP 18.2.0; see README.md.
+modelRoles:
+  default: inverno-local/qwen3.8-27b
+cycleOrder: [default]
+enabledModels: [inverno-local/qwen3.8-27b]
+
+# This is a complete replacement array. Suppress all project/user discovery
+# sources; profile models.yml and the explicit --config overlay load directly.
+disabledProviders: [native, claude, codex, gemini, github, opencode, cursor, agents-md]
+
+# No substitution or promotion to another model.
+contextPromotion:
+  enabled: false
+retry:
+  modelFallback: false
+
+# One on-model, text-summary path. Do not use server compaction, bitmap
+# snapcompact, handoff, or shake for this qualification.
+compaction:
+  enabled: true
+  asyncEnabled: false
+  midTurnEnabled: true
+  methodOrder: [soft]
+  thresholdTokens: 65536
+  thresholdPercent: -1
+  reserveTokens: 32768
+  keepRecentTokens: 20000
+  autoContinue: true
+
+# Remove auxiliary model turns and dynamic/discovered surfaces.
+advisor:
+  enabled: false
+prewalk:
+  enabled: false
+autolearn:
+  enabled: false
+marketplace:
+  autoUpdate: off
+mcp:
+  enableProjectConfig: false
+tools:
+  xdev: false

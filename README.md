@@ -62,6 +62,18 @@ with `tool-call-limit` when its ACP tool calls exceed `--max-tool-calls`
 (default 100) or when the same tool call (kind, title, and input) repeats
 consecutively beyond `--max-tool-repetitions` (default 8).
 
+## OMP worker profile
+
+[examples/omp](examples/omp/README.md) contains an isolated Oh My Pi 18.2.0 ACP
+profile for a local OpenAI-compatible model. OMP remains an external tool; its Bun
+runtime does not select the target project's runtime or package manager. New
+maintained JavaScript/TypeScript projects use Node.js and pnpm.
+
+A valid ACP `max_tokens` result is classified as `generation-limit`, not a protocol
+violation. It still fails the attempt and cannot bypass the worker report or
+independent verifier. Raising wall time does not change the worker model's output
+limit; set that limit in the worker's pinned model configuration.
+
 ## Worker judgment and structured outcomes
 
 New CLI runs require a worker report by default. The bundled worker prompt
