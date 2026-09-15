@@ -38,6 +38,15 @@ Also accepted: `--prompt`, `--worker-report`, `--max-attempts`,
 `--no-tool-output-bytes`, `--max-tool-calls`, `--max-tool-repetitions`, and
 `--run-id`. The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
 
+## Assessment before retries
+
+An optional `--progress-evaluator-command JSON_ARGV` runs a fresh assessment after
+failed-attempt cleanup and before another worker is started. A supported distinct
+next approach is required; errors or infrastructure blockers stop for review.
+Acceptance still requires the worker report, Git invariants and independent verifier.
+See [configuration and limits](examples/progress-evaluator/README.md). This
+between-attempt gate does not implement periodic mid-attempt progress evaluation.
+
 ## Worker prompt template
 
 The worker receives a single prompt rendered from a template. The default is

@@ -30,6 +30,8 @@ Example ACP argv (replace the binary/config paths with your installed locations)
 ```json
 [
   "/absolute/versioned/omp",
+  "--system-prompt", "/absolute/diriger/prompts/omp-system.md",
+  "--extension", "/absolute/diriger/examples/omp/diriger-system.mjs",
   "--profile", "diriger-omp",
   "acp",
   "--config", "/absolute/home/.omp/profiles/diriger-omp/agent/config.yml",
@@ -69,3 +71,21 @@ Older runs keep their frozen worker profile; do not resume a Goose run under OMP
 Qualification evidence lives in the durable gig artifacts, including initial
 failures and exact profile versions. Do not infer production readiness just from
 these template files or from a successful handshake.
+
+## Diriger-owned worker instructions
+
+Use the bundled `prompts/omp-system.md` and explicit `diriger-system.mjs` extension.
+`--system-prompt` alone replaces OMP's main instruction template but retains a
+project footer with its own completion rules. The supported `before_agent_start`
+hook replaces the worker-turn system blocks with the exact prompt file. Tool
+schemas remain supplied by OMP; its independent compaction prompts are unchanged.
+Keep both paths explicit in argv so Diriger fingerprints both dependencies.
+`--no-extensions` continues to disable discovery while the named extension is
+loaded explicitly. No OMP fork is required.
+
+The prompt respects task investigation budgets, supported BLOCKED outcomes,
+project conventions, verification and honest gap reporting. It does not enforce
+elapsed-time progress by itself. See [between-attempt evaluation](../progress-evaluator/README.md)
+for the separate deterministic retry gate and its limits. Qualification must check
+the actual wire system prompt and its persistence through compaction, not merely
+that OMP accepted the command-line flags.

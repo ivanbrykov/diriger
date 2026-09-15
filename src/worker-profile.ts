@@ -27,6 +27,11 @@ export interface WorkerProfile {
   readonly configFiles: readonly FileIdentity[];
   /** ACP argv entries that name files, so changing an adapter script cannot switch harnesses. */
   readonly argvFiles: readonly FileIdentity[];
+  readonly progressEvaluator?: {
+    readonly argv: readonly string[];
+    readonly executable: FileIdentity;
+    readonly argvFiles: readonly FileIdentity[];
+  };
 }
 
 const ENVIRONMENT_KEYS = [
@@ -164,6 +169,15 @@ export async function captureWorkerProfile(
     openaiRoute: openaiRoute(env),
     configFiles: await configurationFiles(environment),
     argvFiles: await argvFiles(argv, config.repositoryPath),
+    ...(config.progressEvaluator === undefined ? {} : {
+      progressEvaluator: {
+        argv: [...config.progressEvaluator.command],
+        executable: await fileIdentity(await resolveExecutable(
+          config.progressEvaluator.command[0]!, env.PATH, config.repositoryPath,
+        )),
+        argvFiles: await argvFiles(config.progressEvaluator.command, config.repositoryPath),
+      },
+    }),
   };
 }
 function same(left: unknown, right: unknown): boolean {

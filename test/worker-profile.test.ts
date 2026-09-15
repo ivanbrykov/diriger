@@ -203,3 +203,21 @@ test("pins non-secret OpenAI route controls including host and path", async () =
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test("freezes evaluator executable, adapter, and system-prompt dependencies", async () => {
+  const f = await fixture();
+  try {
+    const adapter = join(f.root, "evaluate.mjs");
+    const prompt = join(f.root, "evaluate.md");
+    await writeFile(adapter, "original adapter");
+    await writeFile(prompt, "bounded assessment");
+    const config = { ...f.config, progressEvaluator: {
+      command: [f.agent, adapter, prompt], timeoutMs: 1000,
+    } };
+    const env = { PATH: f.bin };
+    const profile = await captureWorkerProfile(config, env);
+    expect(profile.progressEvaluator?.argvFiles).toHaveLength(2);
+    await writeFile(prompt, "changed assessment policy");
+    await expect(validateWorkerProfile(profile, config, env)).rejects.toThrow("runtime profile drift");
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});

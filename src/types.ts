@@ -14,6 +14,11 @@ export interface SupervisorConfig {
   readonly acpCommand?: ReadonlyArray<string>;
   /** Runtime settings selected at run creation; supplied by the supervisor only. */
   readonly workerEnvironment?: NodeJS.ProcessEnv;
+  /** Fresh model assessment after failed attempt cleanup; never runs alongside the worker. */
+  readonly progressEvaluator?: {
+    readonly command: ReadonlyArray<string>;
+    readonly timeoutMs: number;
+  };
   readonly maxAttempts: number;
   readonly workerTimeoutMs: number;
   readonly noToolTimeoutMs: number;
@@ -61,7 +66,17 @@ export interface VerificationResult {
   readonly wrapperExitCode?: number;
 }
 
+export interface ProgressEvaluationRecord {
+  readonly status: "progress" | "stuck" | "escalate-infrastructure" | "error";
+  readonly reason?: string;
+  readonly nextHypothesis?: string;
+  readonly evidencePath: string;
+  readonly evaluatedAt: string;
+  readonly retryAllowed: boolean;
+}
+
 export interface AttemptRecord {
+  readonly progressEvaluation?: ProgressEvaluationRecord;
   readonly attempt: number;
   readonly startedAt: string;
   readonly finishedAt: string;

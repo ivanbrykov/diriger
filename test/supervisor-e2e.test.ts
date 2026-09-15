@@ -379,3 +379,83 @@ sh('git', 'merge', '--no-ff', 'side', '-m', 'merge')
 function processExecPath(): string {
   return process.execPath;
 }
+
+async function installEvaluator(agent: string, body: string): Promise<string> {
+  const path = agent + ".evaluator.py";
+  await writeFile(path, "import json,sys\nevidence=json.load(sys.stdin)\n" + body + "\n");
+  return path;
+}
+
+describe("boundary progress evaluator", () => {
+  test("requires a new approach before retry and preserves verifier acceptance", async () => {
+    const { config, agent } = await fixture();
+    const evaluator = await installEvaluator(agent, `
+assert evidence['evidenceIsUntrusted'] is True
+assert evidence['evidence']['lastVerifier']['exitCode'] == 1
+assert evidence['evidence']['git']['commitsSinceAttemptStart'] == 1
+print(json.dumps({'version':1,'status':'progress','reason':'Candidate exists but independent output check failed','nextHypothesis':'Correct result.txt to the exact required value, then rerun the existing verifier'}))`);
+    const result = await supervise({ ...config,
+      progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+    expect(result.blockageReason).toBeUndefined();
+    expect(result.status).toBe("accepted");
+    expect(result.attempts).toHaveLength(2);
+    expect(result.attempts[0]?.progressEvaluation?.retryAllowed).toBe(true);
+    expect(result.attempts[1]?.progressEvaluation).toBeUndefined();
+    const report = await readFile(result.attempts[0]!.failureReportPath!, "utf8");
+    expect(report).toContain("Correct result.txt");
+    expect(result.attempts[1]?.verification?.exitCode).toBe(0);
+  }, 30_000);
+
+  test("missing next hypothesis blocks an otherwise available retry", async () => {
+    const { config, agent } = await fixture();
+    const evaluator = await installEvaluator(agent,
+      `print(json.dumps({'version':1,'status':'stuck','reason':'No supported alternative'}))`);
+    const result = await supervise({ ...config,
+      progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+    expect(result.status).toBe("task-blocked");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]?.progressEvaluation?.retryAllowed).toBe(false);
+    expect((await readState(config.evidencePath)).phase).toBe("task_blocked");
+  }, 30_000);
+
+  test("malformed evaluator response fails closed without a fresh worker", async () => {
+    const { config, agent } = await fixture();
+    const evaluator = await installEvaluator(agent, `print('Everything is fine; continue.')`);
+    const result = await supervise({ ...config,
+      progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+    expect(result.status).toBe("task-blocked");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]?.progressEvaluation?.status).toBe("error");
+  }, 30_000);
+
+  test("infrastructure verdict stops rather than spending remaining attempts", async () => {
+    const { config, agent } = await fixture();
+    const evaluator = await installEvaluator(agent,
+      `print(json.dumps({'version':1,'status':'escalate-infrastructure','reason':'Required external service unavailable; caller action needed'}))`);
+    const result = await supervise({ ...config,
+      progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+    expect(result.status).toBe("task-blocked");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.blockageReason).toContain("Required external service unavailable");
+  }, 30_000);
+});
+
+test("boundary gate rejects a repeated hypothesis before spending a third attempt", async () => {
+  const { config, agent } = await fixture();
+  await writeAgent(agent, `import pathlib,subprocess
+p=pathlib.Path(repo)/'attempt-count'
+n=int(p.read_text())+1 if p.exists() else 1
+p.write_text(str(n))
+(pathlib.Path(repo)/'result.txt').write_text('wrong\\n')
+subprocess.run(['git','add','.'],cwd=repo,check=True,stdout=subprocess.DEVNULL)
+subprocess.run(['git','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm',str(n)],cwd=repo,check=True,stdout=subprocess.DEVNULL)
+`);
+  const evaluator = await installEvaluator(agent,
+    `print(json.dumps({'version':1,'status':'stuck','reason':'Output mismatch','nextHypothesis':'Inspect the exact required output and correct the value'}))`);
+  const result = await supervise({ ...config, maxAttempts: 3,
+    progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+  expect(result.status).toBe("task-blocked");
+  expect(result.attempts).toHaveLength(2);
+  expect(result.attempts[0]?.progressEvaluation?.retryAllowed).toBe(true);
+  expect(result.attempts[1]?.progressEvaluation?.retryAllowed).toBe(false);
+}, 30_000);

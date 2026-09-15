@@ -20,6 +20,8 @@ const USAGE = [
   "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array (required)",
   "  --prompt PATH                   Worker prompt template (default: bundled prompts/worker.md)",
   "  --worker-report required|optional  Structured worker outcome requirement (default: required)",
+  "  --progress-evaluator-command JSON_ARGV  Independent assessment between failed attempts (optional)",
+  "  --progress-evaluator-timeout-seconds N  Assessment wall limit (default: 120)",
   "  --max-attempts N                Fresh worker attempts (default: 2)",
   "  --worker-timeout-seconds N      Per-worker wall timeout (default: 1800)",
   "  --no-tool-timeout-seconds N     Tool-free time gate for generation budget (default: 90)",
@@ -185,6 +187,13 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
   const reportMode = values.get("worker-report") ?? "required";
   if (reportMode !== "required" && reportMode !== "optional")
     throw new Error("--worker-report must be required or optional");
+  const evaluatorRaw = values.get("progress-evaluator-command");
+  if (evaluatorRaw === undefined && values.has("progress-evaluator-timeout-seconds"))
+    throw new Error("--progress-evaluator-timeout-seconds requires --progress-evaluator-command");
+  const progressEvaluator = evaluatorRaw === undefined ? undefined : {
+    command: parseAcpCommand(evaluatorRaw),
+    timeoutMs: positiveInteger(values, "progress-evaluator-timeout-seconds", 120) * 1_000,
+  };
   const timestamp = new Date()
     .toISOString()
     .replaceAll(/[-:]/g, "")
@@ -198,6 +207,7 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
     evidencePath: resolve(required(values, "evidence")),
     acpCommand,
     workerReportRequired: reportMode === "required",
+    ...(progressEvaluator === undefined ? {} : { progressEvaluator }),
     maxAttempts: positiveInteger(values, "max-attempts", 2),
     workerTimeoutMs:
       positiveInteger(values, "worker-timeout-seconds", 1_800) * 1_000,

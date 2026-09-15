@@ -216,3 +216,17 @@ describe("runObservedProcess", () => {
     expect(result.exitCode).not.toBe(0);
   });
 });
+
+test("progress evaluator is opt-in and validates its finite budget", () => {
+  const args = ["run", "--repo", "/tmp/repo", "--plan", "/tmp/plan", "--stage", "1",
+    "--verifier", "/tmp/verify", "--acp-command", '["worker"]', "--evidence", "/tmp/evidence"];
+  expect(parseConfig(args).progressEvaluator).toBeUndefined();
+  expect(parseConfig([...args, "--progress-evaluator-command", '["node","/tmp/evaluate.mjs"]'])
+    .progressEvaluator).toEqual({ command: ["node", "/tmp/evaluate.mjs"], timeoutMs: 120000 });
+  expect(() => parseConfig([...args, "--progress-evaluator-timeout-seconds", "0"]))
+    .toThrow("requires --progress-evaluator-command");
+  expect(() => parseConfig([...args, "--progress-evaluator-command", "[]"]))
+    .toThrow("nonempty argv");
+  expect(() => parseConfig([...args, "--progress-evaluator-command", '["eval"]',
+    "--progress-evaluator-timeout-seconds", "0"])) .toThrow("positive integer");
+});

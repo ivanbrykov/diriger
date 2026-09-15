@@ -1,3 +1,5 @@
+import { evaluateProgress, serializeProgressEvidence } from "./progress-evaluator.js";
+import { buildProgressEvidence } from "./progress-evidence.js";
 import { constants } from "node:fs";
 import { open, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -27,6 +29,7 @@ import {
 } from "./worker-report.js";
 import type {
   AttemptRecord,
+  ProgressEvaluationRecord,
   RunRecord,
   SupervisorConfig,
   VerificationResult,
@@ -188,6 +191,13 @@ export async function validateConfig(config: SupervisorConfig): Promise<void> {
     (!evidenceRelative.startsWith(".." + "/") && evidenceRelative !== "..")
   )
     throw new Error("evidence path must be outside the mutable repository worktree");
+  if (config.progressEvaluator !== undefined) {
+    const evaluator = config.progressEvaluator;
+    if (!Array.isArray(evaluator.command) || evaluator.command.length === 0 ||
+      evaluator.command.some((part) => typeof part !== "string" || part.trim() === "") ||
+      !Number.isSafeInteger(evaluator.timeoutMs) || evaluator.timeoutMs < 1)
+      throw new Error("invalid progress evaluator configuration");
+  }
   if (config.maxAttempts < 1) {
     throw new Error("max attempts must be at least 1");
   }
@@ -361,6 +371,8 @@ function restoredRecord(state: State, config: SupervisorConfig): RunRecord {
             postHead: value.postHead,
             postStatus: value.postStatus,
             worker: value.worker,
+            ...(value.progressEvaluation === null || value.progressEvaluation === undefined
+              ? {} : { progressEvaluation: value.progressEvaluation }),
             ...(value.protocol === null || value.protocol === undefined
               ? {}
               : { protocol: value.protocol }),
@@ -563,6 +575,13 @@ export async function resumeSupervision(
       config.maxAttempts,
     );
     if (decision.action === "fresh-repair") {
+      if (config.progressEvaluator && current.reservedAttempts > 0) {
+        const previous = current.completedAttempts?.find((item) => item.attempt === current.reservedAttempts);
+        const evaluation = previous?.result?.progressEvaluation;
+        if (!evaluation || typeof evaluation !== "object" || Array.isArray(evaluation) ||
+          evaluation.retryAllowed !== true)
+          throw new ResumeBlockedError("resume blocked: interrupted attempt has no durable evaluator permission for a fresh retry");
+      }
       if (profile === undefined)
         throw new ResumeBlockedError(
           "resume cannot launch a fresh worker without a frozen runtime profile",
@@ -1273,25 +1292,96 @@ async function superviseOwned(
     const knownGapsReported =
       workerReport?.status === "complete" &&
       workerReport.knownGaps.length > 0;
-    const taskBlocked =
+    let taskBlocked =
       !verifierIntegrityFailure &&
       (decisionBlocked || (knownGapsReported && problem === undefined));
-    const blockageReason = decisionBlocked
+    let blockageReason = decisionBlocked
       ? workerReport?.blocker?.decisionNeeded ?? "worker reported blocked"
       : knownGapsReported
         ? "worker reported known gaps: " + workerReport!.knownGaps.join("; ")
         : undefined;
 
+    let progressEvaluation: ProgressEvaluationRecord | undefined;
+    if (config.progressEvaluator && failureReason !== undefined && !taskBlocked &&
+        historyFailure === undefined && !verifierIntegrityFailure &&
+        execution.protocol?.cleanupComplete === true && attempt < config.maxAttempts) {
+      const evaluator = config.progressEvaluator;
+      const previousHypotheses = attempts.flatMap((item) =>
+        item.progressEvaluation?.nextHypothesis ? [item.progressEvaluation.nextHypothesis] : []);
+      await updateAttempt({ progressEvaluationPending: true });
+      try {
+        const evidence = await buildProgressEvidence({
+            protocolPath: prefix + "-worker.acp.jsonl",
+            repositoryPath: config.repositoryPath,
+            preHead,
+            lastVerifier: verification === undefined ? null : {
+              exitCode: verification.exitCode, output: boundedFailureOutput(verification.output),
+              timedOut: verification.timedOut,
+              ...(verification.outputLimited === undefined ? {} : { outputLimited: verification.outputLimited }),
+            },
+          failureReason,
+          taskBrief: (await Bun.file(frozenConfig.planPath).text()).slice(0, 16000),
+          previousHypotheses,
+        });
+        const inputArtifact = await writeAttemptArtifact(config.evidencePath, attempt,
+          "progress-evidence.json", new TextEncoder().encode(serializeProgressEvidence(evidence)));
+        artifacts.push(inputArtifact);
+        console.log(`[stage ${config.stage} attempt ${attempt}] evaluator.started`);
+        const verdict = await evaluateProgress({
+          command: evaluator.command,
+          evidence,
+          cwd: config.evidencePath,
+          env: frozenConfig.workerEnvironment ?? process.env,
+          timeoutMs: evaluator.timeoutMs,
+          guardedLaunch: (command) => launchGuarded({
+            lock, command, cwd: config.evidencePath,
+            env: frozenConfig.workerEnvironment ?? process.env,
+            controlPath: prefix + "-evaluator-guard",
+          }),
+        });
+        const hypothesis = "nextHypothesis" in verdict ? verdict.nextHypothesis?.trim() : undefined;
+        const normalize = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
+        const retryAllowed = verdict.status !== "escalate-infrastructure" && Boolean(hypothesis) &&
+          !previousHypotheses.some((previous) => normalize(previous) === normalize(hypothesis!));
+        progressEvaluation = {
+          status: verdict.status,
+          ...("reason" in verdict && verdict.reason ? { reason: verdict.reason } : {}),
+          ...(hypothesis ? { nextHypothesis: hypothesis } : {}),
+          evidencePath: inputArtifact.path, evaluatedAt: now(), retryAllowed,
+        };
+        if (!retryAllowed) {
+          taskBlocked = true;
+          blockageReason = verdict.status === "escalate-infrastructure"
+            ? verdict.reason : "progress evaluator supplied no distinct next approach; caller review required";
+        }
+      } catch (error) {
+        const reason = "progress evaluator failed: " + (error instanceof Error ? error.message : String(error));
+        progressEvaluation = { status: "error", reason, evidencePath: prefix + "-worker.acp.jsonl",
+          evaluatedAt: now(), retryAllowed: false };
+        taskBlocked = true;
+        blockageReason = reason;
+      }
+      artifacts.push(await writeAttemptArtifact(config.evidencePath, attempt,
+        "progress-evaluation.json", JSON.parse(JSON.stringify(progressEvaluation)) as Json));
+      await updateAttempt({ progressEvaluationPending: false,
+        progressEvaluation: JSON.parse(JSON.stringify(progressEvaluation)) as Json });
+      console.log(`[stage ${config.stage} attempt ${attempt}] evaluator.finished status=${progressEvaluation.status} retry=${progressEvaluation.retryAllowed}`);
+    }
+
     let currentFailureReportPath: string | undefined;
     if (failureReason !== undefined) {
       currentFailureReportPath = prefix + "-failure.md";
-      const report = failureReport(
+      const baseReport = failureReport(
         config,
         attempt,
         failureReason,
         verification,
         historyFailure !== undefined,
       );
+      const report = baseReport + (progressEvaluation === undefined ? "" :
+        "\n## Independent retry assessment\n\n" + JSON.stringify(progressEvaluation, null, 2) +
+        "\n\nUse the supported next approach and existing artifacts; do not repeat broad discovery. " +
+        "This assessment cannot relax the task or its acceptance checks.\n");
       await writeFile(currentFailureReportPath, report);
       artifacts.push(
         await writeAttemptArtifact(
@@ -1315,6 +1405,7 @@ async function superviseOwned(
           JSON.stringify({
             accepted: false,
             failureReason,
+            progressEvaluation,
             attempt,
             startedAt: attemptStartedAt,
             preHead,
@@ -1336,6 +1427,7 @@ async function superviseOwned(
           JSON.stringify({
             accepted: false,
             taskBlocked: true,
+            progressEvaluation,
             blockageReason,
             attempt,
             startedAt: attemptStartedAt,
@@ -1351,6 +1443,7 @@ async function superviseOwned(
         ) as Record<string, Json>,
       });
     attempts.push({
+      ...(progressEvaluation === undefined ? {} : { progressEvaluation }),
       attempt,
       startedAt: attemptStartedAt,
       finishedAt: now(),
