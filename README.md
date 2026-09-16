@@ -9,6 +9,20 @@ It does not interpret model prose as success, run a daemon, manage a model
 lifecycle, create a worktree, or sandbox tools. Supply a prepared local Git
 worktree and a **new** external evidence directory for each run.
 
+## Inverno delegation skill
+
+[skills/inverno](skills/inverno/SKILL.md) retains the shared caller-side delegation
+skill, including the [decomposition protocol and stage-brief template](skills/inverno/references/decomposition.md).
+The caller owns architecture and stage planning; Qwen implements one prepared stage
+at a time. Diriger's runtime acceptance checks remain separate.
+
+The installed copy is `~/.agents/skills/inverno`; supported agents discover that
+shared location, and Claude may link to it. This repository copy is versioned for
+retention and maintenance, not automatically loaded or installed. Keep the repository
+and installed copies synchronized when changing the skill; review differences before
+copying updates so local changes are preserved. Machine paths and qualification
+notes in its references describe the current personal inverno setup.
+
 ## CLI
 
 The installed command is `diriger`. From a source checkout, use
