@@ -48,8 +48,11 @@ already small enough may remain one stage; bounded investigation can be a separa
 stage with an explicit question and proceed/BLOCKED gate.
 
 Review each stage's result before launching dependent work and carry verified
-findings forward. This is an internal readiness gate, not a new user-approval
-step. Continue within existing authorization. Read
+findings forward — or, when every stage's acceptance is fully verifier-encoded,
+hand off the whole chain at once with stop-on-first-failure gating (see
+[chain handoff](references/decomposition.md#chain-handoff-submit-the-whole-stage-chain-at-once)).
+Either way this is an internal readiness gate, not a new user-approval step.
+Continue within existing authorization. Read
 [worker judgment](references/worker-judgment.md) and include its worker-facing
 instructions in the handoff. The worker does not automatically inherit this skill.
 

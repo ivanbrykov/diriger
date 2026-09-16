@@ -140,6 +140,36 @@ work. Carry forward a concise handoff: verified decisions, passing checks, relev
 changes, remaining questions and the next stage's exact baseline. Avoid replaying
 whole transcripts or making each stage rediscover the same libraries.
 
+### Chain handoff: submit the whole stage chain at once
+
+Per-stage caller review is the default because it catches drift early. When every
+stage's acceptance is fully encoded in its verifier, that review adds little: the
+machinery can gate progression instead. You may prepare and submit the entire
+dependency-ordered chain in one handoff when ALL of the following hold:
+
+- Every stage has a strong independent verifier that covers its acceptance
+  criteria; "caller would want to look at the diff first" is not encoded anywhere.
+- Each stage brief is self-sufficient: it does not depend on how an earlier
+  worker happened to implement its stage, or it says exactly what to read from
+  the predecessor's report and commit.
+- The chain halts at the first non-accepted stage; nothing downstream launches
+  on a failed, blocked or unverified stage.
+
+Chain mechanics on inverno: prepare every stage's directory, brief, verifier and
+budget up front, then drive the chain with a small script or Pueue dependencies
+(`--after`). Each stage starts from its predecessor's accepted commit, the driver
+checks the supervisor's accepted result before launching the next stage, and each
+stage receives the predecessor's commit SHA and worker report as its
+established-findings input — that automatic handoff replaces the caller's
+inter-stage review. The whole-task budget still applies across the chain; give
+each stage its own finite limits within it.
+
+The caller still owns decomposition, architecture and final integration, and
+reviews the full chain at the end (or at the break point) before integrating.
+Do not use chain mode when stages share unresolved decisions, later briefs depend
+on earlier implementation choices, or any verifier is weak — that is where
+per-stage caller review earns its cost.
+
 If blocked or unsuccessful, review the evidence and change the hypothesis, scope
 or prerequisites before another submission. Preserve the old run and its budget;
 do not restart the original large prompt as a “fresh” attempt. Do not automatically
