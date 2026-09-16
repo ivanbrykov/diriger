@@ -112,6 +112,16 @@ fixtures before spending model time: a failure caused by bad paths, unsupported
 runner configuration or broken oracle setup must not be scored as worker failure.
 Declare verifier dependencies for freezing as described in [execution.md](execution.md).
 
+## Budget sizing and cushion
+
+Size `--max-tool-calls` as expected implementation calls plus verification and
+finalization headroom, not just the editing work. Fixture debugging, lint
+repair loops, re-run checks, commit and report all consume calls; a schema
+stage with a real-DB verifier needs roughly 120, not 80. Diriger grants a
+finalize cushion by default (`--tool-call-cushion`, 15 extra calls for one
+finalize-only turn), but it is a safety net, not budget headroom: size the main
+budget so the cushion is rarely used.
+
 ## 4. Caller readiness gate, then one stage at a time
 
 Do not submit implementation until the caller can answer:
