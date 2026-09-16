@@ -137,6 +137,7 @@ fi
       noToolTimeoutMs: 5_000,
       noToolOutputBytes: 1_000_000,
       maxToolCalls: 100,
+      toolCallCushion: 0,
       maxToolRepetitions: 8,
       runId: "fake-recovery",
     },

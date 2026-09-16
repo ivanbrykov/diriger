@@ -20,7 +20,7 @@ async function fixture() {
   await writeFile(prompt, "{{ plan }}\nRepository: {{ repository_path }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n");
   await writeFile(verifier, "#!/usr/bin/env bash\nset -eu\ntest -f \"$SAMOVAR_BENCH_REPO/result.txt\"\n"); await chmod(verifier, 0o755);
   git(repo, ["init", "-q", "-b", "main"]); git(repo, ["config", "user.name", "Test"]); git(repo, ["config", "user.email", "test@example.invalid"]); git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
-  const config: SupervisorConfig = { repositoryPath: repo, planPath: plan, stage: "outcome", verifierPath: verifier, promptPath: prompt, evidencePath: evidence, acpCommand: ["python3", agent], workerReportRequired: true, maxAttempts: 2, workerTimeoutMs: 5_000, noToolTimeoutMs: 5_000, noToolOutputBytes: 100_000, maxToolCalls: 100, maxToolRepetitions: 8, runId: "outcome-test" };
+  const config: SupervisorConfig = { repositoryPath: repo, planPath: plan, stage: "outcome", verifierPath: verifier, promptPath: prompt, evidencePath: evidence, acpCommand: ["python3", agent], workerReportRequired: true, maxAttempts: 2, workerTimeoutMs: 5_000, noToolTimeoutMs: 5_000, noToolOutputBytes: 100_000, maxToolCalls: 100, toolCallCushion: 0, maxToolRepetitions: 8, runId: "outcome-test" };
   return { root, repo, evidence, plan, verifier, agent, prompt, marker, config };
 }
 async function acpWorker(path: string, report?: string) {

@@ -24,6 +24,8 @@ export interface SupervisorConfig {
   readonly noToolTimeoutMs: number;
   readonly noToolOutputBytes: number;
   readonly maxToolCalls: number;
+  /** One-time finalize-turn tool-call grace after the main budget; 0 disables. */
+  readonly toolCallCushion: number;
   readonly maxToolRepetitions: number;
   readonly runId: string;
 }
@@ -98,6 +100,10 @@ export interface AttemptRecord {
     readonly cleanupComplete: boolean;
     /** ACP tool-call session updates observed before the attempt ended. */
     readonly toolCalls?: number;
+    /** Present when the tool-call cushion granted one finalize turn. */
+    readonly cushionUsed?: true;
+    /** Tool calls observed after the main tool-call budget was exhausted. */
+    readonly finalizeToolCalls?: number;
     /** Present only when ACP ended for excessive tool-free generated text. */
     readonly watchdog?: {
       readonly toolProgressAgeMs: number;

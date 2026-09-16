@@ -17,7 +17,11 @@ async function run(
   timeout = 200,
   lifecycle: string[] = [],
   watchdog = { timeoutMs: 200, textBytes: 256 },
-  limits = { maxToolCalls: 100, maxToolRepetitions: 8 },
+  limits: {
+    maxToolCalls: number;
+    maxToolRepetitions: number;
+    toolCallCushion?: number;
+  } = { maxToolCalls: 100, maxToolRepetitions: 8 },
   lifecycleFailure?: string,
 ) {
   const root = await mkdtemp(join(tmpdir(), "acp-"));
@@ -43,6 +47,7 @@ async function run(
       noToolTimeoutMs: watchdog.timeoutMs,
       noToolOutputBytes: watchdog.textBytes,
       maxToolCalls: limits.maxToolCalls,
+      toolCallCushion: limits.toolCallCushion ?? 0,
       maxToolRepetitions: limits.maxToolRepetitions,
       maxAttempts: 1,
       runId: "t",
@@ -120,6 +125,7 @@ test("lifecycle failures still terminate the peer", async () => {
       noToolTimeoutMs: 1,
       noToolOutputBytes: 1,
       maxToolCalls: 100,
+      toolCallCushion: 0,
       maxToolRepetitions: 8,
       maxAttempts: 1,
       runId: "t",
@@ -206,6 +212,16 @@ const maxTokensFrame = JSON.stringify({
   id: 3,
   result: { stopReason: "max_tokens" },
 });
+const cancelledFrame = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 3,
+  result: { stopReason: "cancelled" },
+});
+const finalizeEndTurnFrame = JSON.stringify({
+  jsonrpc: "2.0",
+  id: 4,
+  result: { stopReason: "end_turn" },
+});
 test("max_tokens is a generation limit rather than a protocol error", async () => {
   const body =
     `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
@@ -277,10 +293,96 @@ test("tool calls beyond the attempt budget terminate with tool-call-limit", asyn
   const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
     maxToolCalls: 3,
     maxToolRepetitions: 8,
+    toolCallCushion: 0,
   });
   expect(r.worker.terminationReason).toBe("tool-call-limit");
   expect(r.protocol?.error).toContain("tool-call budget");
   expect(r.protocol?.toolCalls).toBe(4);
+  expect(r.protocol?.cushionUsed).toBeUndefined();
+}, 5_000);
+
+test("budget exhaustion grants one cushioned finalize turn to end_turn", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${toolCallFrame("read", { path: "a" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "b" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "c" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "d" })}'; ` +
+    `read cancel; echo '${cancelledFrame}'; ` +
+    `read fin; echo '${toolCallFrame("write", { path: "report" })}'; ` +
+    `echo '${finalizeEndTurnFrame}'; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 3,
+    maxToolRepetitions: 8,
+    toolCallCushion: 2,
+  });
+  expect(r.worker.terminationReason).toBeUndefined();
+  expect(r.worker.exitCode).toBe(0);
+  expect(r.protocol?.cushionUsed).toBe(true);
+  expect(r.protocol?.finalizeToolCalls).toBe(2);
+  expect(r.protocol?.toolCalls).toBe(5);
+  expect(r.protocol?.stopReason).toBe("end_turn");
+}, 5_000);
+
+test("tool calls beyond the finalize cushion terminate with tool-call-limit", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${toolCallFrame("read", { path: "a" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "b" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "c" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "d" })}'; ` +
+    `read cancel; echo '${cancelledFrame}'; read fin; ` +
+    `echo '${toolCallFrame("read", { path: "e" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "f" })}'; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 3,
+    maxToolRepetitions: 8,
+    toolCallCushion: 2,
+  });
+  expect(r.worker.terminationReason).toBe("tool-call-limit");
+  expect(r.protocol?.error).toContain("cushion");
+  expect(r.protocol?.cushionUsed).toBe(true);
+  expect(r.protocol?.finalizeToolCalls).toBe(3);
+}, 5_000);
+
+test("the repetition guard stays active during the finalize turn", async () => {
+  const repeated = toolCallFrame("edit", { path: "a", text: "x" });
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${toolCallFrame("read", { path: "a" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "b" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "c" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "d" })}'; ` +
+    `read cancel; echo '${cancelledFrame}'; read fin; ` +
+    `echo '${repeated}'; echo '${repeated}'; echo '${repeated}'; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 3,
+    maxToolRepetitions: 2,
+    toolCallCushion: 10,
+  });
+  expect(r.worker.terminationReason).toBe("tool-call-limit");
+  expect(r.protocol?.error).toContain("repeated an identical tool call");
+  expect(r.protocol?.cushionUsed).toBe(true);
+}, 5_000);
+
+test("an end_turn racing the budget cancel completes without cushion evidence", async () => {
+  const body =
+    `read a; echo '${initFrame}'; read b; echo '${sessionFrame}'; read c; ` +
+    `echo '${toolCallFrame("read", { path: "a" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "b" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "c" })}'; ` +
+    `echo '${toolCallFrame("read", { path: "d" })}'; ` +
+    `echo '${endTurnFrame}'; read cancel; sleep 5`;
+  const r = await run(body, 5_000, [], { timeoutMs: 200, textBytes: 256 }, {
+    maxToolCalls: 3,
+    maxToolRepetitions: 8,
+    toolCallCushion: 5,
+  });
+  expect(r.worker.terminationReason).toBeUndefined();
+  expect(r.worker.exitCode).toBe(0);
+  expect(r.protocol?.cushionUsed).toBeUndefined();
+  expect(r.protocol?.toolCalls).toBe(4);
+  expect(r.protocol?.stopReason).toBe("end_turn");
 }, 5_000);
 
 test("consecutive identical tool calls terminate with tool-call-limit", async () => {
@@ -387,6 +489,7 @@ test("guarded ACP end_turn survives TERM-resistant peer missing its durable exit
         noToolTimeoutMs: 1,
         noToolOutputBytes: 1,
         maxToolCalls: 100,
+        toolCallCushion: 0,
         maxToolRepetitions: 8,
         maxAttempts: 1,
         runId: "t",

@@ -31,6 +31,7 @@ describe("parseConfig", () => {
     expect(config.runId).toBe("ledger-test");
     expect(config.workerTimeoutMs).toBe(1_800_000);
     expect(config.maxToolCalls).toBe(100);
+    expect(config.toolCallCushion).toBe(15);
     expect(config.maxToolRepetitions).toBe(8);
   });
 
@@ -55,10 +56,35 @@ describe("parseConfig", () => {
       "25",
       "--max-tool-repetitions",
       "3",
+      "--tool-call-cushion",
+      "0",
     ]);
     expect(config.promptPath).toBe("/tmp/worker-prompt.md");
     expect(config.maxToolCalls).toBe(25);
     expect(config.maxToolRepetitions).toBe(3);
+    expect(config.toolCallCushion).toBe(0);
+  });
+
+  test("rejects a negative tool-call cushion", () => {
+    expect(() =>
+      parseConfig([
+        "run",
+        "--repo",
+        "/tmp/repo",
+        "--plan",
+        "/tmp/plan.md",
+        "--stage",
+        "1",
+        "--verifier",
+        "/tmp/verify",
+        "--acp-command",
+        '["agent"]',
+        "--evidence",
+        "/tmp/evidence",
+        "--tool-call-cushion",
+        "-1",
+      ]),
+    ).toThrow("--tool-call-cushion must be a non-negative integer");
   });
 
   test("defaults the prompt template to the bundled worker prompt", () => {

@@ -69,6 +69,7 @@ test("a supervised ACP blocked report is terminal without verifier or a retry", 
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 100_000,
     maxToolCalls: 100,
+    toolCallCushion: 0,
     maxToolRepetitions: 8,
     runId: "acp-outcome",
   };

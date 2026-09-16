@@ -29,6 +29,7 @@ async function fixture() {
     noToolTimeoutMs: 1,
     noToolOutputBytes: 1,
     maxToolCalls: 100,
+    toolCallCushion: 0,
     maxToolRepetitions: 8,
     runId: "profile",
   };

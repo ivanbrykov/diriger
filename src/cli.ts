@@ -27,6 +27,7 @@ const USAGE = [
   "  --no-tool-timeout-seconds N     Tool-free time gate for generation budget (default: 90)",
   "  --no-tool-output-bytes N        ACP text bytes since tool (default: 262144)",
   "  --max-tool-calls N              ACP tool-call budget per attempt (default: 100)",
+  "  --tool-call-cushion N           Finalize-turn tool-call grace after the budget (default: 15; 0 disables)",
   "  --max-tool-repetitions N        Consecutive identical tool-call budget (default: 8)",
   "  --run-id ID                     Evidence/session prefix (default: timestamp)",
   "  --verifier-manifest PATH        JSON verifier dependency closure",
@@ -75,6 +76,20 @@ function positiveInteger(
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error("--" + key + " must be a positive integer");
+  }
+  return value;
+}
+
+function nonNegativeInteger(
+  values: Map<string, string>,
+  key: string,
+  fallback: number,
+): number {
+  const raw = values.get(key);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("--" + key + " must be a non-negative integer");
   }
   return value;
 }
@@ -215,6 +230,7 @@ export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
       positiveInteger(values, "no-tool-timeout-seconds", 90) * 1_000,
     noToolOutputBytes: positiveInteger(values, "no-tool-output-bytes", 262_144),
     maxToolCalls: positiveInteger(values, "max-tool-calls", 100),
+    toolCallCushion: nonNegativeInteger(values, "tool-call-cushion", 15),
     maxToolRepetitions: positiveInteger(values, "max-tool-repetitions", 8),
     runId: values.get("run-id") ?? "diriger-" + timestamp,
   };

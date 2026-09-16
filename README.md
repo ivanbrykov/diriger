@@ -49,7 +49,8 @@ as a nonempty JSON array and is required.
 
 Also accepted: `--prompt`, `--worker-report`, `--max-attempts`,
 `--worker-timeout-seconds`, `--no-tool-timeout-seconds`,
-`--no-tool-output-bytes`, `--max-tool-calls`, `--max-tool-repetitions`, and
+`--no-tool-output-bytes`, `--max-tool-calls`, `--tool-call-cushion`,
+`--max-tool-repetitions`, and
 `--run-id`. The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
 
 ## Assessment before retries
@@ -84,6 +85,15 @@ Runaway control is deterministic rather than prompt-based: an attempt ends
 with `tool-call-limit` when its ACP tool calls exceed `--max-tool-calls`
 (default 100) or when the same tool call (kind, title, and input) repeats
 consecutively beyond `--max-tool-repetitions` (default 8).
+
+Exceeding `--max-tool-calls` first grants one finalize grace instead of an
+immediate kill: the supervisor cancels the in-flight turn and reprompts the
+worker once to only confirm current work, create the required commit, and
+write its report within `--tool-call-cushion` additional tool calls (default
+15; 0 disables the cushion and restores the immediate kill). Exceeding the
+cushion, or any non-`end_turn` finalize outcome, still fails the attempt
+with `tool-call-limit`; the repetition guard, tool-free watchdog, and worker
+deadline stay active throughout.
 
 ## OMP worker profile
 
