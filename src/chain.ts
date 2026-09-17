@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { access, mkdir, open, readFile, rename } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./retry.js";
 import { resumeSupervision, supervise } from "./supervisor.js";
 import type {
   ChainOutcome,
@@ -42,6 +43,7 @@ const TOP_KEYS = [
   "prompt",
   "worker",
   "evaluator",
+  "retries",
   "defaults",
   "stages",
 ] as const;
@@ -108,6 +110,74 @@ function budgets(value: unknown, where: string): ManifestBudgets {
   return result;
 }
 
+function count(value: unknown, where: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new ChainError(`${where} must be a non-negative integer`);
+  return value;
+}
+
+function fraction(value: unknown, where: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    throw new ChainError(`${where} must be a non-negative number`);
+  return value;
+}
+
+/**
+ * Resolve the retry policy. `defaults.maxAttempts` is the legacy spelling and
+ * maps onto unconditional retries; setting both is a manifest error.
+ */
+function parseRetries(
+  value: unknown,
+  maxAttempts: number | undefined,
+): { readonly policy: RetryPolicy; readonly maxAttempts: number } {
+  if (value === undefined) {
+    if (maxAttempts === undefined)
+      return {
+        policy: DEFAULT_RETRY_POLICY,
+        maxAttempts: 1 + DEFAULT_RETRY_POLICY.hard + DEFAULT_RETRY_POLICY.soft,
+      };
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1)
+      throw new ChainError("defaults.maxAttempts must be a positive integer");
+    return {
+      policy: { ...DEFAULT_RETRY_POLICY, hard: maxAttempts - 1, soft: 0 },
+      maxAttempts,
+    };
+  }
+  if (!rec(value)) throw new ChainError("manifest retries must be an object");
+  for (const key of Object.keys(value))
+    if (!["hard", "soft", "extend"].includes(key))
+      throw new ChainError(`unknown manifest key: retries.${key}`);
+  if (maxAttempts !== undefined)
+    throw new ChainError(
+      "manifest cannot set both retries and defaults.maxAttempts",
+    );
+  const hard = count(value.hard ?? 0, "retries.hard");
+  const soft = count(value.soft ?? 0, "retries.soft");
+  let extend = DEFAULT_RETRY_POLICY.extend;
+  if (value.extend !== undefined) {
+    if (!rec(value.extend))
+      throw new ChainError("manifest retries.extend must be an object");
+    for (const key of Object.keys(value.extend))
+      if (!["toolCalls", "timeout", "ceiling"].includes(key))
+        throw new ChainError(`unknown manifest key: retries.extend.${key}`);
+    const ceiling = value.extend.ceiling ?? extend.ceiling;
+    if (typeof ceiling !== "number" || !Number.isFinite(ceiling) || ceiling < 1)
+      throw new ChainError("retries.extend.ceiling must be a number >= 1");
+    extend = {
+      toolCalls: fraction(
+        value.extend.toolCalls ?? extend.toolCalls,
+        "retries.extend.toolCalls",
+      ),
+      timeout: fraction(
+        value.extend.timeout ?? extend.timeout,
+        "retries.extend.timeout",
+      ),
+      ceiling,
+    };
+  }
+  return { policy: { hard, soft, extend }, maxAttempts: 1 + hard + soft };
+}
+
 function parseManifestValue(
   raw: unknown,
   manifestPath: string,
@@ -154,6 +224,10 @@ function parseManifestValue(
   }
 
   const defaults = budgets(raw.defaults, "defaults");
+  const { policy: retries, maxAttempts } = parseRetries(
+    raw.retries,
+    defaults.maxAttempts,
+  );
   if (!Array.isArray(raw.stages) || raw.stages.length === 0)
     throw new ChainError("manifest stages must be a nonempty array");
 
@@ -218,7 +292,8 @@ function parseManifestValue(
     workerCommand,
     workerReportRequired: report === "required",
     ...(progressEvaluator === undefined ? {} : { progressEvaluator }),
-    budgets: { ...DEFAULT_BUDGETS, ...defaults },
+    budgets: { ...DEFAULT_BUDGETS, ...defaults, maxAttempts },
+    retries,
     stages,
   };
 }
@@ -637,6 +712,7 @@ async function stageConfig(
     maxToolCalls: budget(manifest, stage, "maxToolCalls"),
     toolCallCushion: budget(manifest, stage, "toolCallCushion"),
     maxToolRepetitions: budget(manifest, stage, "maxToolRepetitions"),
+    retryPolicy: manifest.retries,
     ...(closure === undefined
       ? {}
       : {

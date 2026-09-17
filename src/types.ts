@@ -1,3 +1,5 @@
+import type { RetryPolicy } from "./retry.js";
+
 export interface SupervisorConfig {
   readonly repositoryPath: string;
   readonly planPath: string;
@@ -27,6 +29,8 @@ export interface SupervisorConfig {
   /** One-time finalize-turn tool-call grace after the main budget; 0 disables. */
   readonly toolCallCushion: number;
   readonly maxToolRepetitions: number;
+  /** Hard/soft retry policy; absent means a single attempt (legacy behavior). */
+  readonly retryPolicy?: RetryPolicy;
   /** Chain handoff: accepted commit of the predecessor stage; empty when absent. */
   readonly previousStageCommit?: string;
   /** Chain handoff: worker report path of the predecessor stage; empty when absent. */
@@ -79,6 +83,8 @@ export interface RunManifest {
   readonly progressEvaluator?: SupervisorConfig["progressEvaluator"];
   /** Resolved global budget defaults; stages may override per field. */
   readonly budgets: Required<ManifestBudgets>;
+  /** Resolved hard/soft retry policy applied to every stage. */
+  readonly retries: RetryPolicy;
   readonly stages: ReadonlyArray<ManifestStage>;
 }
 

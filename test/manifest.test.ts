@@ -223,4 +223,82 @@ describe("parseRunManifest", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("defaults to one unconditional retry and derives the attempt cap", async () => {
+    const { dir, manifest } = await writeManifest(base);
+    try {
+      const parsed = await parseRunManifest(manifest);
+      expect(parsed.retries).toEqual({
+        hard: 1,
+        soft: 0,
+        extend: { toolCalls: 0.5, timeout: 0.5, ceiling: 3 },
+      });
+      expect(parsed.budgets.maxAttempts).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("parses a hard/soft policy and derives attempts from it", async () => {
+    const { dir, manifest } = await writeManifest({
+      ...base,
+      retries: {
+        hard: 2,
+        soft: 3,
+        extend: { toolCalls: 1, timeout: 0.25, ceiling: 4 },
+      },
+    });
+    try {
+      const parsed = await parseRunManifest(manifest);
+      expect(parsed.retries).toEqual({
+        hard: 2,
+        soft: 3,
+        extend: { toolCalls: 1, timeout: 0.25, ceiling: 4 },
+      });
+      expect(parsed.budgets.maxAttempts).toBe(6);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("maps the legacy maxAttempts onto unconditional retries", async () => {
+    const { dir, manifest } = await writeManifest({
+      ...base,
+      defaults: { maxAttempts: 4 },
+    });
+    try {
+      const parsed = await parseRunManifest(manifest);
+      expect(parsed.retries.hard).toBe(3);
+      expect(parsed.retries.soft).toBe(0);
+      expect(parsed.budgets.maxAttempts).toBe(4);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects retries combined with maxAttempts and unknown retry keys", async () => {
+    const conflict = await writeManifest({
+      ...base,
+      retries: { hard: 1 },
+      defaults: { maxAttempts: 2 },
+    });
+    try {
+      await expect(parseRunManifest(conflict.manifest)).rejects.toThrow(
+        "cannot set both retries and defaults.maxAttempts",
+      );
+    } finally {
+      await rm(conflict.dir, { recursive: true, force: true });
+    }
+    const unknown = await writeManifest({
+      ...base,
+      retries: { hard: 1, bonus: 2 },
+    });
+    try {
+      await expect(parseRunManifest(unknown.manifest)).rejects.toThrow(
+        "unknown manifest key: retries.bonus",
+      );
+    } finally {
+      await rm(unknown.dir, { recursive: true, force: true });
+    }
+  });
 });
