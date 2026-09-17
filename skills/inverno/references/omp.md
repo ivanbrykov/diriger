@@ -87,6 +87,11 @@ remaining attempt; never alongside the worker. The local adapter command goes in
 `evaluator.command` (with optional `evaluator.timeoutSeconds`, default 120); the
 canonical machine copy is
 `/data/work/releases/diriger-config/20260917-manifest/evaluator-command.json`.
+Its Node runtime is the asdf-installed Node 24 at
+`/home/ivan/.asdf/installs/nodejs/24.18.0/bin/node`; reference that versioned
+binary directly, never the `~/.asdf/shims/node` shim (the shim needs `asdf` on
+`PATH`). Do not point it at a per-experiment `tooling/node` copy or at
+`/data/work/paseo-tooling/node` (Node 22, too old for the adapter).
 Omitting
 `evaluator` disables the gate for that run. It receives bounded tool/Git/verifier
 evidence, no worker reasoning transcript, and has no model tools. A supported new
