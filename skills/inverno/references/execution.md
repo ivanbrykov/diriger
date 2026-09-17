@@ -77,7 +77,8 @@ export OMP_PROFILE=diriger-omp182
 exec /home/ivan/.local/bin/diriger run /absolute/remote/task/manifest.json
 ```
 
-with `manifest.json`:
+with `manifest.json` (this shows the shape; the two `command` arrays are
+placeholders — see the warning below):
 
 ```json
 {
@@ -85,8 +86,8 @@ with `manifest.json`:
   "chain": "task-name",
   "repository": "/absolute/remote/worktree",
   "evidence": "/absolute/remote/new-evidence",
-  "worker": { "command": ["/absolute/remote/omp", "acp"] },
-  "evaluator": { "command": ["/absolute/remote/qwen-adapter", "acp"], "timeoutSeconds": 120 },
+  "worker": { "command": ["<pinned OMP argv from acp-command.json>"] },
+  "evaluator": { "command": ["<pinned evaluator argv from evaluator-command.json>"], "timeoutSeconds": 120 },
   "defaults": {
     "maxAttempts": 2,
     "workerTimeoutSeconds": 1800,
@@ -101,6 +102,23 @@ with `manifest.json`:
   ]
 }
 ```
+
+**Do not run a bare `omp acp`.** The launcher no longer injects a worker, and a
+bare OMP argv omits the owned system prompt and extension, silently reverting to
+stock OMP behavior (the unbounded prompt that caused the earlier investigation
+loops). Build the arrays from the canonical files:
+
+```sh
+DIRCFG=/data/work/releases/diriger-config/20260917-manifest
+cat "$DIRCFG/acp-command.json"        # -> manifest worker.command
+cat "$DIRCFG/evaluator-command.json"  # -> manifest evaluator.command (omit the
+                                      #    evaluator object to disable the gate)
+```
+
+The same arrays are published verbatim in [OMP configuration](omp.md) and are
+fingerprinted by the run's worker profile. Prefer a first/only stage for an
+ordinary task; add stages only when the acceptance checks are genuinely
+independent.
 
 The worker and evaluator commands are frozen as part of the manifest; see
 [OMP configuration](omp.md) for the pinned OMP argv and the local evaluator.
@@ -134,7 +152,8 @@ worker's normal completion, not a replacement for the independent verifier.
 
 `task-blocked` (exit 4) stops automatic retries and remains terminal on resume.
 A complete report with known gaps cannot receive automatic acceptance even with
-green checks. Read the report in run.json/immutable attempt artifacts and return the
+green checks. Read the report in the stage's `run.json`/immutable attempt artifacts
+(`<evidence>/stages/<id>/` for a chain) and return the
 unresolved decision/gaps to the caller. Pueue may label this Failed(4); do not restart
 it blindly. Ownership/recovery safety blockage remains exit 3. A crash with a pending
 veto report and unproven completion safety-blocks for inspection instead of starting

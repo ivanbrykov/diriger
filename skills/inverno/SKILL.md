@@ -30,6 +30,9 @@ require the target project to use Bun. Carry this distinction into worker briefs
 
 OMP18.2.0 is the user-approved experimental default on inverno as of2026-09-15.
 Read [OMP configuration](references/omp.md) for launch settings and known gaps.
+The run manifest must carry the pinned worker and evaluator argv from the machine
+config layer (`diriger-config/20260917-manifest/`); the launcher no longer
+injects them, and a bare `omp acp` is not the approved worker.
 The user accepts experimental adoption; do not reintroduce an approval gate based
 on the earlier trial-only status. Keep independent report/Git/verifier checks. The deployed worker uses our bounded
 system prompt while OMP retains compaction. Qwen assesses failed attempts before

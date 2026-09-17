@@ -16,7 +16,10 @@ directory**, preserving old evidence and reviewing partial changes before prepar
 the new baseline. Do not restart the old Pueue command (it still selects Goose) or
 change its frozen worker in place.
 
-Decision/pinned argv: `/data/work/releases/diriger-config/20260915-owned-prompt/`.
+Decision/pinned argv layer: `/data/work/releases/diriger-config/20260917-manifest/`.
+Canonical `worker.command`: `acp-command.json`; canonical `evaluator.command`:
+`evaluator-command.json` in that directory. Copy those arrays into the run
+manifest; the launcher does not supply them.
 Previous launcher: `/home/ivan/.local/bin/diriger.before-omp-default-20260915`.
 
 Installed binary: `/data/work/releases/omp/18.2.0/omp`.
@@ -33,7 +36,10 @@ ACP argv:
 ```
 
 Use this array as the manifest's `worker.command` with normal task inputs; use the
-shared serial Pueue group. Native server remains127.0.0.1:8080, model context163840,
+shared serial Pueue group. The canonical machine copy is
+`/data/work/releases/diriger-config/20260917-manifest/acp-command.json`. A bare
+`omp acp` without `--system-prompt`/`--extension` reverts to stock OMP guidance
+and is not the approved worker. Native server remains127.0.0.1:8080, model context163840,
 maxTokens32768. Soft text compaction only; threshold65536, keepRecent20000,
 reserve32768. No model promotion/fallback, subagents, or inherited configuration
 providers. Do not mutate profile files during an active/frozen run. Read the target
@@ -68,7 +74,7 @@ Genuine-rejection evidence: `artifacts/2026-09-15-omp-real-overflow/RESULTS.md` 
 
 ## Owned worker guidance and assessment (2026-09-15)
 
-The deployed engine is4d5bed0. New default runs use Diriger's versioned
+The deployed engine is122265f. New default runs use Diriger's versioned
 `prompts/omp-system.md` plus explicit `examples/omp/diriger-system.mjs` hook.
 The hook sets the complete worker-turn system prompt; --system-prompt alone
 retains an OMP footer. Discovery stays disabled; tool schemas and OMP compaction
@@ -78,7 +84,10 @@ persistence and early-fact retention through real compaction passed.
 The manifest may also carry an optional `evaluator` object for the **between-attempt**
 Qwen assessment. It runs after failed worker/verifier cleanup, before spending a
 remaining attempt; never alongside the worker. The local adapter command goes in
-`evaluator.command` (with optional `evaluator.timeoutSeconds`, default 120). Omitting
+`evaluator.command` (with optional `evaluator.timeoutSeconds`, default 120); the
+canonical machine copy is
+`/data/work/releases/diriger-config/20260917-manifest/evaluator-command.json`.
+Omitting
 `evaluator` disables the gate for that run. It receives bounded tool/Git/verifier
 evidence, no worker reasoning transcript, and has no model tools. A supported new
 approach is required to retry. Missing/repeated hypothesis, malformed output,
