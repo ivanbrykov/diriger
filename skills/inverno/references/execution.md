@@ -57,8 +57,15 @@ Prepare a clean dedicated Git tree, a clear plan, and an executable independent
 verifier outside the tree. Diriger requires a new descendant commit on the same
 branch and a clean tree. The verifier must leave the exact HEAD/ref and tree
 unchanged. It receives `SAMOVAR_BENCH_REPO` and the stage as its first argument.
-Include all verifier dependencies with `--verifier-manifest` if it is not
+Declare verifier dependencies in the stage's `verifierManifest` when it is not
 self-contained; inspect the installed release README for that manifest schema.
+
+Diriger is configured entirely by one version-2 JSON manifest; there are no run
+flags. It lists the repository, a fresh evidence directory, the worker command,
+an optional evaluator, budget defaults and one or more ordered stages. A
+single-stage run is the one-entry case; a multi-stage manifest runs sequentially
+and halts at the first non-accepted stage. Manifest paths resolve relative to the
+manifest file.
 
 Example remote launcher after replacing task paths and selecting finite limits:
 
@@ -67,23 +74,40 @@ Example remote launcher after replacing task paths and selecting finite limits:
 set -eu
 export PATH=/home/ivan/.bun/bin:/home/ivan/.local/bin:/usr/local/bin:/usr/bin:/bin
 export OMP_PROFILE=diriger-omp182
-exec /home/ivan/.local/bin/diriger run \
-  --repo /absolute/remote/worktree \
-  --plan /absolute/remote/inputs/plan.md \
-  --stage 1 \
-  --verifier /absolute/remote/inputs/verify.sh \
-  --max-attempts 2 --worker-timeout-seconds 1800 \
-  --no-tool-timeout-seconds 90 --no-tool-output-bytes 262144 \
-  --evidence /absolute/remote/new-evidence
+exec /home/ivan/.local/bin/diriger run /absolute/remote/task/manifest.json
 ```
 
-The inverno launcher defaults new runs to OMP18.2.0 when `--acp-command` is
-omitted; an explicit option overrides it. Direct repository CLI use still requires
-that option. See [OMP configuration](omp.md). The bundled worker prompt
-template is used unless `--prompt /absolute/path.md` overrides it (placeholders
-like `{{ stage }}`; unknown tokens fail the run). Runaway control is
-deterministic: `--max-tool-calls` (default 100) and `--max-tool-repetitions`
-(default 8) bound the ACP session independent of the agent's own limits.
+with `manifest.json`:
+
+```json
+{
+  "version": 2,
+  "chain": "task-name",
+  "repository": "/absolute/remote/worktree",
+  "evidence": "/absolute/remote/new-evidence",
+  "worker": { "command": ["/absolute/remote/omp", "acp"] },
+  "evaluator": { "command": ["/absolute/remote/qwen-adapter", "acp"], "timeoutSeconds": 120 },
+  "defaults": {
+    "maxAttempts": 2,
+    "workerTimeoutSeconds": 1800,
+    "noToolTimeoutSeconds": 90,
+    "noToolOutputBytes": 262144,
+    "maxToolCalls": 120,
+    "toolCallCushion": 15,
+    "maxToolRepetitions": 8
+  },
+  "stages": [
+    { "id": "s1", "plan": "stages/s1.md", "verifier": "stages/s1.verify.sh" }
+  ]
+}
+```
+
+The worker and evaluator commands are frozen as part of the manifest; see
+[OMP configuration](omp.md) for the pinned OMP argv and the local evaluator.
+The bundled worker prompt template is used unless `prompt` names another file
+(placeholders like `{{ stage }}`; unknown tokens fail the run). Runaway control is
+deterministic: `maxToolCalls` (default 100) and `maxToolRepetitions` (default 8)
+bound the ACP session independent of the agent's own limits.
 
 Those limits are explicit example defaults, not a requirement for every task.
 In the 2026-09-08 watchdog correction and later releases, the ACP no-tool byte
@@ -93,7 +117,8 @@ timeout. Thought activity is recorded separately but does not reset that budget.
 The hard wall timeout still bounds silence and ongoing generation. Earlier
 releases can stop legitimate thought streams because token-sized framing inflates
 the byte count; use the corrected installed release for new tasks.
-Diriger is single-stage and does not create worktrees or manage the model server.
+Diriger executes a manifest's stages sequentially and does not create worktrees or
+manage the model server.
 Preserve its evidence directory and the task launcher for recovery. The machine launcher is in a versioned configuration directory; inspect its
 `exec` target to find the pinned engine source/README. The CLI has no `--help` option
 in the installed version; running without arguments prints usage with exit 2.
@@ -115,45 +140,53 @@ it blindly. Ownership/recovery safety blockage remains exit 3. A crash with a pe
 veto report and unproven completion safety-blocks for inspection instead of starting
 a new worker. Missing/invalid required reports cannot be accepted.
 
-Custom legacy recipes can explicitly select `--worker-report optional`; that retains
-legacy acceptance without the report gate. Programmatic callers opt in through
+Custom legacy recipes can explicitly select `"report": "optional"` in the
+manifest's `worker` object; that retains legacy acceptance without the report gate. Programmatic callers opt in through
 workerReportRequired:true. Existing frozen runs keep their original policy.
 
 ## Between-attempt assessment
 
-The inverno default launcher supplies a tool-free Qwen evaluator for new runs.
-It runs after failed-attempt cleanup, only if another attempt remains; a concrete
-new approach is required before retry. Its evidence/verdict are retained in attempt
-artifacts, and the repair report carries the proposed approach. It cannot approve
-work or bypass independent checks. Malformed/timeout/infrastructure outcomes stop
-for review without starting another worker. No periodic mid-attempt evaluation is
-enabled; the first attempt still relies on existing wall/tool limits.
+The manifest's optional `evaluator` object runs a tool-free Qwen assessment for
+new runs. It runs after failed-attempt cleanup, only if another attempt remains; a
+concrete new approach is required before retry. Its evidence/verdict are retained
+in attempt artifacts, and the repair report carries the proposed approach. It
+cannot approve work or bypass independent checks. Malformed/timeout/infrastructure
+outcomes stop for review without starting another worker. No periodic mid-attempt
+evaluation is enabled; the first attempt still relies on existing wall/tool limits.
 
 An interrupted assessment without durable retry permission remains safety-blocked
 on resume. Do not bypass this by changing frozen config or starting an unapproved
-fresh run. Direct engine use is opt-in via --progress-evaluator-command JSON_ARGV;
-normal machine launch supplies the local adapter automatically. Explicit command
-overrides are respected.
+fresh run. Omitting `evaluator` from the manifest disables between-attempt
+assessment for that run.
 
 ## Monitoring and recovery
 
 Run these on inverno, addressing the existing evidence:
 
 ```sh
-diriger status --evidence /absolute/remote/evidence --json
-diriger recover --evidence /absolute/remote/evidence --json
+diriger status /absolute/remote/evidence --json
+diriger recover /absolute/remote/evidence --json
 ```
 
-Read-only inspection need not enter the model queue. For a crashed run, review
-recovery preview and ownership; use `recover --apply` only for this task's
-reclaimable stale owner. Confirm the original queue job/controller is no longer
+Both accept a stage evidence directory or a chain evidence root; the chain root
+reports per-stage status and outcome. Read-only inspection need not enter the model
+queue. For a crashed run, review recovery preview and ownership; use `recover
+--apply` only for this task's reclaimable stale owner (target a stage evidence
+directory, not a chain root). Confirm the original queue job/controller is no longer
 active and use Diriger's recorded ownership/cleanup checks to establish that no
-guarded writer remains; a queue terminal state alone is insufficient. Then enqueue `resume --evidence ... --json` through the
-same serial group and frozen model environment. Existing task authorization
-covers routine safe recovery within the original budget. Never delete locks to
-force progress, kill another task, reset the worktree, or rerun `run` into a new
-evidence directory just to reset attempts. Terminal failure is a reportable
-outcome; expanding scope/budgets requires the user's direction.
+guarded writer remains; a queue terminal state alone is insufficient. Then enqueue
+`resume` through the same serial group and frozen model environment:
+
+```sh
+diriger resume /absolute/remote/evidence --json
+```
+
+For a chain, `resume` keeps accepted stages and continues from the first
+non-accepted stage. Existing task authorization covers routine safe recovery within
+the original budget. Never delete locks to force progress, kill another task, reset
+the worktree, or rerun `run` into a new evidence directory just to reset attempts.
+Terminal failure is a reportable outcome; expanding scope/budgets requires the user's
+direction.
 
 Diriger exits: 0 accepted/ready/preview, 1 terminal failure, 2 invalid input/state,
 3 active or safety-blocked, 4 task-blocked. An accepted resume reuses proof; other resumes can verify

@@ -8,6 +8,8 @@ export const PROMPT_VARIABLES = [
   "failure_report_path",
   "worker_report_path",
   "worker_judgment",
+  "previous_stage_commit",
+  "previous_stage_report_path",
 ] as const;
 
 const TOKEN = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;

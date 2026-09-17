@@ -27,7 +27,85 @@ export interface SupervisorConfig {
   /** One-time finalize-turn tool-call grace after the main budget; 0 disables. */
   readonly toolCallCushion: number;
   readonly maxToolRepetitions: number;
+  /** Chain handoff: accepted commit of the predecessor stage; empty when absent. */
+  readonly previousStageCommit?: string;
+  /** Chain handoff: worker report path of the predecessor stage; empty when absent. */
+  readonly previousStageReportPath?: string;
   readonly runId: string;
+}
+
+/** Budget fields a manifest may set in `defaults` or per stage. */
+export interface ManifestBudgets {
+  readonly maxAttempts?: number;
+  readonly workerTimeoutSeconds?: number;
+  readonly maxToolCalls?: number;
+  readonly toolCallCushion?: number;
+  readonly maxToolRepetitions?: number;
+  readonly noToolTimeoutSeconds?: number;
+  readonly noToolOutputBytes?: number;
+}
+
+export interface ManifestStage {
+  readonly id: string;
+  /** Absolute path, resolved against the manifest directory. */
+  readonly planPath: string;
+  /** Absolute path, resolved against the manifest directory. */
+  readonly verifierPath: string;
+  /** Absolute path, resolved against the manifest directory. */
+  readonly verifierManifestPath?: string;
+  /** Predecessor stage id; absent on the first stage. */
+  readonly after?: string;
+  /** Per-stage budget overrides. */
+  readonly budgets?: ManifestBudgets;
+}
+
+/**
+ * A complete run specification parsed from one version-2 JSON document. The
+ * same shape describes a single bounded stage and a multi-stage chain; a
+ * one-stage manifest is the trivial case.
+ */
+export interface RunManifest {
+  readonly version: 2;
+  /** Absolute path of the JSON document; relative paths resolve against it. */
+  readonly manifestPath: string;
+  readonly chainId: string;
+  /** Absolute path of the implementation worktree. */
+  readonly repositoryPath: string;
+  /** Absolute path of this run's fresh evidence directory. */
+  readonly evidencePath: string;
+  readonly promptPath: string;
+  readonly workerCommand: ReadonlyArray<string>;
+  readonly workerReportRequired: boolean;
+  readonly progressEvaluator?: SupervisorConfig["progressEvaluator"];
+  /** Resolved global budget defaults; stages may override per field. */
+  readonly budgets: Required<ManifestBudgets>;
+  readonly stages: ReadonlyArray<ManifestStage>;
+}
+
+export type ChainStageStatus =
+  | "pending"
+  | "running"
+  | "accepted"
+  | "failed"
+  | "task-blocked";
+
+export interface ChainStageState {
+  readonly id: string;
+  readonly status: ChainStageStatus;
+  readonly commit?: string;
+  readonly runEvidence?: string;
+}
+
+export type ChainOutcome = "running" | "accepted" | "failed" | "task-blocked";
+
+export interface ChainState {
+  readonly version: 1;
+  readonly chainId: string;
+  readonly manifestSha256: string;
+  readonly stages: ReadonlyArray<ChainStageState>;
+  readonly outcome: ChainOutcome;
+  readonly startedAt: string;
+  readonly updatedAt: string;
 }
 
 export type TerminationReason =

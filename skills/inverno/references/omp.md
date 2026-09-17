@@ -6,14 +6,15 @@ This supersedes the earlier default-promotion hold. Retain Diriger's report,
 Git/verifier, time/tool and cleanup gates; experimental adoption does not imply
 all failure modes are resolved.
 
-The installed `/home/ivan/.local/bin/diriger` supplies the pinned OMP ACP command
-for new `run` calls when `--acp-command` is omitted. Explicit workers are respected.
-The repository CLI still requires the option. Export `OMP_PROFILE=diriger-omp182`
-in task launchers and preserve it for subsequent resumes. Status/recover/resume
-are not rewritten by the default launcher. Rerunning a failed Goose task under
-OMP means a **new run/evidence directory**, preserving old evidence and reviewing
-partial changes before preparing the new baseline. Do not restart the old Pueue
-command (it still selects Goose) or change its frozen worker in place.
+The installed `/home/ivan/.local/bin/diriger` is the pinned release launcher. The
+version-2 manifest is the only run configuration, so the pinned OMP argv below
+belongs in the manifest's `worker.command` array; there is no launcher-supplied
+`--acp-command` default. Export `OMP_PROFILE=diriger-omp182` in task launchers and
+preserve it for subsequent resumes. Status/recover/resume do not use the worker
+command. Rerunning a failed Goose task under OMP means a **new run/evidence
+directory**, preserving old evidence and reviewing partial changes before preparing
+the new baseline. Do not restart the old Pueue command (it still selects Goose) or
+change its frozen worker in place.
 
 Decision/pinned argv: `/data/work/releases/diriger-config/20260915-owned-prompt/`.
 Previous launcher: `/home/ivan/.local/bin/diriger.before-omp-default-20260915`.
@@ -31,8 +32,8 @@ ACP argv:
 ["/data/work/releases/omp/18.2.0/omp", "--system-prompt", "/data/work/releases/diriger/4d5bed0ca3de8321ff7135bbbeed2344dc8262e3/prompts/omp-system.md", "--extension", "/data/work/releases/diriger/4d5bed0ca3de8321ff7135bbbeed2344dc8262e3/examples/omp/diriger-system.mjs","--profile","diriger-omp182","acp","--config","/home/ivan/.omp/profiles/diriger-omp182/agent/config.yml","--model","inverno-local/qwen3.8-27b","--tools","read,edit,write,bash","--approval-mode","yolo","--no-extensions","--no-skills","--no-rules","--no-lsp","--no-pty","--no-title","--no-prewalk"]
 ```
 
-Pass this to `diriger run --acp-command ...` with normal task inputs; use the shared
-serial Pueue group. Native server remains127.0.0.1:8080, model context163840,
+Use this array as the manifest's `worker.command` with normal task inputs; use the
+shared serial Pueue group. Native server remains127.0.0.1:8080, model context163840,
 maxTokens32768. Soft text compaction only; threshold65536, keepRecent20000,
 reserve32768. No model promotion/fallback, subagents, or inherited configuration
 providers. Do not mutate profile files during an active/frozen run. Read the target
@@ -74,14 +75,16 @@ retains an OMP footer. Discovery stays disabled; tool schemas and OMP compaction
 remain. Both files are explicit argv dependencies and fingerprinted. Exact prompt
 persistence and early-fact retention through real compaction passed.
 
-The default machine launcher also supplies a **between-attempt** Qwen evaluator.
-It runs after failed worker/verifier cleanup, before spending a remaining attempt;
-never alongside the worker. It receives bounded tool/Git/verifier evidence, no
-worker reasoning transcript, and has no model tools. A supported new approach is
-required to retry. Missing/repeated hypothesis, malformed output, evaluator failure,
-or infrastructure verdict stops for review. Reports/Git/verifier still decide
-acceptance. Do not treat an evaluator's proposal as authorization to restart a
-terminal/exhausted run.
+The manifest may also carry an optional `evaluator` object for the **between-attempt**
+Qwen assessment. It runs after failed worker/verifier cleanup, before spending a
+remaining attempt; never alongside the worker. The local adapter command goes in
+`evaluator.command` (with optional `evaluator.timeoutSeconds`, default 120). Omitting
+`evaluator` disables the gate for that run. It receives bounded tool/Git/verifier
+evidence, no worker reasoning transcript, and has no model tools. A supported new
+approach is required to retry. Missing/repeated hypothesis, malformed output,
+evaluator failure, or infrastructure verdict stops for review. Reports/Git/verifier
+still decide acceptance. Do not treat an evaluator's proposal as authorization to
+restart a terminal/exhausted run.
 
 The user explicitly chose same-Qwen assessment between attempts. **Periodic
 mid-attempt evaluation is not implemented/enabled.** An unproductive first attempt

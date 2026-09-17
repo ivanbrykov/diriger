@@ -21,6 +21,12 @@ Plan path: {{ plan_path }}
 Failure report: {{ failure_report_path }}
 Structured report output (when supplied): {{ worker_report_path }}
 
+Chained stage handoff (empty values mean this is the first stage; when set, the
+predecessor stage was accepted at that commit and you must build on it — read
+its worker report before planning):
+Previous stage commit: {{ previous_stage_commit }}
+Previous stage report: {{ previous_stage_report_path }}
+
 Plan:
 
 {{ plan }}

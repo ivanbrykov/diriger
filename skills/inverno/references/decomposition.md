@@ -114,13 +114,14 @@ Declare verifier dependencies for freezing as described in [execution.md](execut
 
 ## Budget sizing and cushion
 
-Size `--max-tool-calls` as expected implementation calls plus verification and
-finalization headroom, not just the editing work. Fixture debugging, lint
-repair loops, re-run checks, commit and report all consume calls; a schema
-stage with a real-DB verifier needs roughly 120, not 80. Diriger grants a
-finalize cushion by default (`--tool-call-cushion`, 15 extra calls for one
-finalize-only turn), but it is a safety net, not budget headroom: size the main
-budget so the cushion is rarely used.
+Size `maxToolCalls` (manifest `defaults.maxToolCalls`, or a stage override) as
+expected implementation calls plus verification and finalization headroom, not
+just the editing work. Fixture debugging, lint repair loops, re-run checks,
+commit and report all consume calls; a schema stage with a real-DB verifier
+needs roughly 120, not 80. Diriger grants a finalize cushion by default
+(`toolCallCushion`, 15 extra calls for one finalize-only turn), but it is a
+safety net, not budget headroom: size the main budget so the cushion is rarely
+used.
 
 ## 4. Caller readiness gate, then one stage at a time
 
@@ -140,7 +141,7 @@ work. Carry forward a concise handoff: verified decisions, passing checks, relev
 changes, remaining questions and the next stage's exact baseline. Avoid replaying
 whole transcripts or making each stage rediscover the same libraries.
 
-### Chain handoff: submit the whole stage chain at once
+### Chain handoff: submit the whole stage chain in one manifest
 
 Per-stage caller review is the default because it catches drift early. When every
 stage's acceptance is fully encoded in its verifier, that review adds little: the
@@ -155,14 +156,24 @@ dependency-ordered chain in one handoff when ALL of the following hold:
 - The chain halts at the first non-accepted stage; nothing downstream launches
   on a failed, blocked or unverified stage.
 
-Chain mechanics on inverno: prepare every stage's directory, brief, verifier and
-budget up front, then drive the chain with a small script or Pueue dependencies
-(`--after`). Each stage starts from its predecessor's accepted commit, the driver
-checks the supervisor's accepted result before launching the next stage, and each
-stage receives the predecessor's commit SHA and worker report as its
-established-findings input — that automatic handoff replaces the caller's
-inter-stage review. The whole-task budget still applies across the chain; give
-each stage its own finite limits within it.
+Chain mechanics are native to Diriger. One version-2 JSON manifest lists the
+repository, evidence directory, worker command, optional evaluator, budgets and a
+ordered `stages` array; a single-stage run is the one-entry case. The caller
+writes the whole manifest and submits it once:
+
+```sh
+exec /home/ivan/.local/bin/diriger run /absolute/remote/task/manifest.json
+```
+
+Diriger freezes the manifest, every stage brief, verifier and the worker prompt
+before the first worker starts, then runs the stages sequentially. Each stage
+begins from its predecessor's accepted commit, receives that commit SHA and the
+predecessor's worker report through the prompt handoff variables, and is accepted
+only when its own report/Git/verifier gates pass. The first non-accepted stage
+halts the chain with durable per-stage evidence; `diriger resume <evidence>`
+continues from the first non-accepted stage without re-running accepted ones.
+The whole-task budget still applies across the chain; give each stage its own
+finite limits within it (`defaults` plus per-stage overrides).
 
 The caller still owns decomposition, architecture and final integration, and
 reviews the full chain at the end (or at the break point) before integrating.
@@ -181,6 +192,8 @@ fields; never conceal genuine gaps to gain acceptance. If Diriger returns
 `task-blocked`, review it and retain its status/evidence—do not rewrite the report
 or mark the run accepted merely because tests passed.
 
-This protocol is caller-side guidance. It does not add an automated stage scheduler,
-a mid-attempt progress evaluator, or new enforcement to Diriger. OMP still supplies
+This protocol is caller-side guidance. Diriger now executes a sequential stage
+chain natively from one manifest and halts on the first non-accepted stage, but it
+remains a bounded supervisor: no parallel/DAG scheduling, no conditional or
+model-chosen routing, and no mid-attempt progress evaluator. OMP still supplies
 tools/sessions/compaction; the caller owns the plan and Diriger owns runtime gates.

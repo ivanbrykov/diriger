@@ -290,30 +290,35 @@ sh('git', 'merge', '--no-ff', 'side', '-m', 'merge')
   test("the CLI exits nonzero after exhausted attempts", async () => {
     const { config, agent } = await fixture();
     const cli = new URL("../src/cli.ts", import.meta.url).pathname;
+    const manifest = join(config.evidencePath, "..", "manifest.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        version: 2,
+        chain: "fake-cli-failure",
+        repository: config.repositoryPath,
+        evidence: config.evidencePath,
+        prompt: config.promptPath,
+        worker: { command: ["python3", agent] },
+        defaults: {
+          maxAttempts: 1,
+          workerTimeoutSeconds: 5,
+          noToolTimeoutSeconds: 5,
+          noToolOutputBytes: 1_000_000,
+          maxToolCalls: 100,
+          toolCallCushion: 0,
+        },
+        stages: [
+          {
+            id: config.stage,
+            plan: config.planPath,
+            verifier: config.verifierPath,
+          },
+        ],
+      }),
+    );
     const process = Bun.spawn(
-      [
-        processExecPath(),
-        cli,
-        "run",
-        "--repo",
-        config.repositoryPath,
-        "--plan",
-        config.planPath,
-        "--stage",
-        config.stage,
-        "--verifier",
-        config.verifierPath,
-        "--acp-command",
-        JSON.stringify(["python3", agent]),
-        "--prompt",
-        config.promptPath,
-        "--evidence",
-        config.evidencePath,
-        "--max-attempts",
-        "1",
-        "--run-id",
-        "fake-cli-failure",
-      ],
+      [processExecPath(), cli, "run", manifest],
       {
         stdout: "pipe",
         stderr: "pipe",

@@ -537,6 +537,8 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         attempt: String(attempt),
         failure_report_path: failureReportPath,
         worker_report_path: input.workerReportPath ?? "",
+        previous_stage_commit: config.previousStageCommit ?? "",
+        previous_stage_report_path: config.previousStageReportPath ?? "",
         worker_judgment:
           input.workerReportPath === undefined
             ? ""

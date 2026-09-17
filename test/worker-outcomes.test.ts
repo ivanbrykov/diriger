@@ -65,8 +65,8 @@ test("a blocked worker produces a durable terminal outcome without verifier or r
   await writeFile(f.verifier, `#!/usr/bin/env bash\nset -eu\ntouch ${f.marker}\n`); await chmod(f.verifier, 0o755);
   const record = await supervise(f.config);
   expect(record.status).toBe("task-blocked"); expect(record.attempts).toHaveLength(1); expect(record.attempts[0]?.workerReport?.status).toBe("blocked"); expect(await Bun.file(f.marker).exists()).toBeFalse(); expect((await readState(f.evidence)).phase).toBe("task_blocked"); expect((await resumeSupervision(f.evidence)).status).toBe("task-blocked");
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "resume", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "resume", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
 }, 10_000);
 
 test("a complete gap-free report permits normal acceptance", async () => {
@@ -117,7 +117,7 @@ test("pending veto without durable worker completion cannot trigger a fresh atte
   const { reconcileRun } = await import("../src/reconciliation.js");
   const decision = await reconcileRun(f.evidence, await readState(f.evidence), 2);
   expect(decision.action).toBe("blocked"); expect(decision.reason).toContain("not durably proven");
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(3);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", f.evidence], { cwd: process.cwd() }).exitCode).toBe(3);
   await expect(resumeSupervision(f.evidence)).rejects.toThrow();
   expect((await readState(f.evidence)).reservedAttempts).toBe(1);
 });

@@ -1,13 +1,21 @@
 # Assessment between attempts
 
 Diriger can run a fresh, tool-free model assessment after an unsuccessful attempt
-and completed worker/verifier cleanup, before consuming another attempt:
+and completed worker/verifier cleanup, before consuming another attempt. Add an
+`evaluator` object to the run manifest:
 
-```sh
-diriger run ... \
-  --progress-evaluator-command '["/absolute/node","/absolute/openai.mjs","http://127.0.0.1:8080/v1","qwen3.8-27b","/absolute/progress-evaluator.md","4096"]' \
-  --progress-evaluator-timeout-seconds 120
+```json
+{
+  "worker": { "command": ["/absolute/path/to/omp", "acp"] },
+  "evaluator": {
+    "command": ["/absolute/node", "/absolute/openai.mjs", "http://127.0.0.1:8080/v1", "qwen3.8-27b", "/absolute/progress-evaluator.md", "4096"],
+    "timeoutSeconds": 120
+  },
+  "stages": [{ "id": "s1", "plan": "stages/s1.md", "verifier": "stages/s1.verify.sh" }]
+}
 ```
+
+Omitting `evaluator` disables the gate for that run.
 
 The adapter uses Node 24 and has no dependencies. Its endpoint, model, prompt and
 output cap are explicit argv. The supervisor fingerprints the executable and

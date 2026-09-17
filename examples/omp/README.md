@@ -7,11 +7,12 @@ the163840 limit; OMP compacted, retried and answered correctly. Earlier injected
 error recovery was inconsistent; terminal error text plus `end_turn` remains a
 known concern. Adoption accepts this uncertainty and retains independent checks.
 
-The inverno machine launcher supplies OMP for new `diriger run` calls without
-`--acp-command`; explicit workers are respected. Installed profile: `diriger-omp182`.
+OMP is selected by the run manifest, not by a launcher default: put the pinned
+argv below in the manifest's `worker.command` array. Installed profile:
+`diriger-omp182`.
 Its pinned argv and decision record are in
 `/data/work/releases/diriger-config/20260915-omp/`. The repository CLI remains
-harness-neutral and requires explicit `--acp-command`. Task launchers should export
+harness-neutral and takes no worker flag. Task launchers should export
 `OMP_PROFILE=diriger-omp182` for new runs and their later resumes.
 
 These files target **OMP 18.2.0** and the local `inverno-local/qwen3.8-27b` profile.
@@ -43,7 +44,7 @@ Example ACP argv (replace the binary/config paths with your installed locations)
 ]
 ```
 
-Supply this JSON to `diriger run --acp-command ...`, with `OMP_PROFILE=diriger-omp`.
+Use this array as the manifest's `worker.command`, with `OMP_PROFILE=diriger-omp`.
 Use a versioned binary rather than an opaque wrapper whose hidden dependencies
 cannot be fingerprinted. Diriger freezes the actual executable, argv files, and
 profile files for repair validation.
