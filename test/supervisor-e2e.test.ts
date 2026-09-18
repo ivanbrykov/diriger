@@ -392,6 +392,13 @@ async function installEvaluator(agent: string, body: string): Promise<string> {
   return path;
 }
 
+// Soft retries are evaluator-gated; hard retries bypass the evaluator by design.
+const SOFT_ONLY = {
+  hard: 0,
+  soft: 1,
+  extend: { toolCalls: 0.5, timeout: 0.5, ceiling: 3 },
+} as const;
+
 describe("boundary progress evaluator", () => {
   test("requires a new approach before retry and preserves verifier acceptance", async () => {
     const { config, agent } = await fixture();
@@ -400,7 +407,7 @@ assert evidence['evidenceIsUntrusted'] is True
 assert evidence['evidence']['lastVerifier']['exitCode'] == 1
 assert evidence['evidence']['git']['commitsSinceAttemptStart'] == 1
 print(json.dumps({'version':1,'status':'progress','reason':'Candidate exists but independent output check failed','nextHypothesis':'Correct result.txt to the exact required value, then rerun the existing verifier'}))`);
-    const result = await supervise({ ...config,
+    const result = await supervise({ ...config, retryPolicy: SOFT_ONLY,
       progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
     expect(result.blockageReason).toBeUndefined();
     expect(result.status).toBe("accepted");
@@ -416,7 +423,7 @@ print(json.dumps({'version':1,'status':'progress','reason':'Candidate exists but
     const { config, agent } = await fixture();
     const evaluator = await installEvaluator(agent,
       `print(json.dumps({'version':1,'status':'stuck','reason':'No supported alternative'}))`);
-    const result = await supervise({ ...config,
+    const result = await supervise({ ...config, retryPolicy: SOFT_ONLY,
       progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
     expect(result.status).toBe("task-blocked");
     expect(result.attempts).toHaveLength(1);
@@ -427,7 +434,7 @@ print(json.dumps({'version':1,'status':'progress','reason':'Candidate exists but
   test("malformed evaluator response fails closed without a fresh worker", async () => {
     const { config, agent } = await fixture();
     const evaluator = await installEvaluator(agent, `print('Everything is fine; continue.')`);
-    const result = await supervise({ ...config,
+    const result = await supervise({ ...config, retryPolicy: SOFT_ONLY,
       progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
     expect(result.status).toBe("task-blocked");
     expect(result.attempts).toHaveLength(1);
@@ -438,13 +445,35 @@ print(json.dumps({'version':1,'status':'progress','reason':'Candidate exists but
     const { config, agent } = await fixture();
     const evaluator = await installEvaluator(agent,
       `print(json.dumps({'version':1,'status':'escalate-infrastructure','reason':'Required external service unavailable; caller action needed'}))`);
-    const result = await supervise({ ...config,
+    const result = await supervise({ ...config, retryPolicy: SOFT_ONLY,
       progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
     expect(result.status).toBe("task-blocked");
     expect(result.attempts).toHaveLength(1);
     expect(result.blockageReason).toContain("Required external service unavailable");
   }, 30_000);
 });
+
+test("a soft extend grants the next attempt a larger budget", async () => {
+  const { config, agent } = await fixture();
+  // Leaves work in the tree (so progress is real) then overruns the wall limit,
+  // which classifies the attempt as budget exhaustion.
+  await writeAgent(agent, `import time
+open(repo + '/partial.txt', 'w').write('wip\\n')
+time.sleep(30)
+`);
+  const evaluator = await installEvaluator(agent,
+    `print(json.dumps({'version':1,'status':'extend','reason':'Real progress; the same approach needs more room'}))`);
+  const result = await supervise({ ...config,
+    workerTimeoutMs: 3_000,
+    maxAttempts: 2,
+    retryPolicy: { hard: 0, soft: 1, extend: { toolCalls: 1, timeout: 1, ceiling: 3 } },
+    progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+  expect(result.status).toBe("failed");
+  expect(result.attempts).toHaveLength(2);
+  expect(result.attempts[0]?.progressEvaluation?.status).toBe("extend");
+  expect(result.attempts[1]?.retry?.extension).toBe(true);
+  expect(result.attempts[1]?.retry?.workerTimeoutMs).toBeGreaterThan(3_000);
+}, 40_000);
 
 test("boundary gate rejects a repeated hypothesis before spending a third attempt", async () => {
   const { config, agent } = await fixture();
@@ -459,6 +488,7 @@ subprocess.run(['git','-c','user.name=Test','-c','user.email=test@example.invali
   const evaluator = await installEvaluator(agent,
     `print(json.dumps({'version':1,'status':'stuck','reason':'Output mismatch','nextHypothesis':'Inspect the exact required output and correct the value'}))`);
   const result = await supervise({ ...config, maxAttempts: 3,
+    retryPolicy: { ...SOFT_ONLY, soft: 2 },
     progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
   expect(result.status).toBe("task-blocked");
   expect(result.attempts).toHaveLength(2);

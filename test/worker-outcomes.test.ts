@@ -76,11 +76,11 @@ test("a complete gap-free report permits normal acceptance", async () => {
   expect(record.status).toBe("accepted"); expect(record.attempts[0]?.workerReport?.status).toBe("complete"); expect((await readState(f.evidence)).phase).toBe("accepted");
 }, 10_000);
 
-test("complete report known gaps vetoes a green verifier before acceptance", async () => {
+test("complete report known gaps are advisory and do not veto a green verifier", async () => {
   const f = await fixture(); await acpWorker(f.agent, '{"version":1,"status":"complete","summary":"partial","knownGaps":["missing migration"],"decisions":[],"validation":["unit test"]}');
   await writeFile(f.verifier, `#!/usr/bin/env bash\nset -eu\ntouch ${f.marker}\ntest "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = done\n`); await chmod(f.verifier, 0o755);
   const record = await supervise(f.config);
-  expect(record.status).toBe("task-blocked"); expect(await Bun.file(f.marker).exists()).toBeTrue(); expect((await readState(f.evidence)).phase).toBe("task_blocked"); expect(record.attempts[0]?.verification?.exitCode).toBe(0);
+  expect(record.status).toBe("accepted"); expect(record.attempts[0]?.verification?.exitCode).toBe(0); expect(record.attempts[0]?.workerReport?.knownGaps).toEqual(["missing migration"]); expect((await readState(f.evidence)).phase).toBe("accepted");
 }, 10_000);
 
 test("missing required report is never accepted", async () => {

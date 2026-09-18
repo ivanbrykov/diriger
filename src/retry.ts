@@ -266,7 +266,7 @@ export function needsEvaluator(input: RetryInput): boolean {
 
 /** Classify a failed attempt from its termination reason and safety flags. */
 export function classifyFailure(input: {
-  readonly terminationReason?: string;
+  readonly terminationReason?: string | undefined;
   readonly historyFailure?: boolean;
   readonly verifierIntegrityFailure?: boolean;
   readonly workerBlocked?: boolean;

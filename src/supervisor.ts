@@ -1,5 +1,15 @@
 import { evaluateProgress, serializeProgressEvidence } from "./progress-evaluator.js";
 import { buildProgressEvidence } from "./progress-evidence.js";
+import {
+  attemptBudget,
+  classifyFailure,
+  decideRetry,
+  DEFAULT_RETRY_POLICY,
+  needsEvaluator,
+  type AttemptBudget,
+  type RetryState,
+  type SoftVerdict,
+} from "./retry.js";
 import { constants } from "node:fs";
 import { open, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -964,6 +974,25 @@ async function superviseOwned(
         }),
   };
   const executor = new AcpAttemptExecutor();
+  const retryPolicy = config.retryPolicy ?? DEFAULT_RETRY_POLICY;
+  const baseBudget: AttemptBudget = {
+    toolCalls: config.maxToolCalls,
+    workerTimeoutMs: config.workerTimeoutMs,
+  };
+  const countRetries = (): RetryState => {
+    let hardUsed = 0,
+      softUsed = 0,
+      extensions = 0;
+    for (const item of attempts) {
+      if (item.retry?.tier === "hard") hardUsed += 1;
+      else if (item.retry?.tier === "soft") softUsed += 1;
+      if (item.retry?.extension === true) extensions += 1;
+    }
+    return { hardUsed, softUsed, extensions };
+  };
+  let retryState = countRetries();
+  let admittedTier: "hard" | "soft" | undefined;
+  let admittedExtension = false;
   const originalRef = runGit(config.repositoryPath, [
     "rev-parse",
     "--symbolic-full-name",
@@ -983,13 +1012,33 @@ async function superviseOwned(
     const prefix = `${config.evidencePath}/attempt-${attempt}`;
     // Evidence is outside the mutable worktree and each worker gets one path.
     const workerReportPath = prefix + "-report.json";
-
+    // Hard retries reuse the stage base; granted extensions increase it.
+    const budget = attemptBudget(
+      baseBudget,
+      retryState.extensions,
+      retryPolicy,
+    );
+    const attemptConfig: SupervisorConfig = {
+      ...frozenConfig,
+      maxToolCalls: budget.toolCalls,
+      workerTimeoutMs: budget.workerTimeoutMs,
+    };
+    // How this attempt was admitted, recorded on its evidence for the reviewer.
+    const thisAttemptRetry =
+      admittedTier === undefined
+        ? undefined
+        : {
+            tier: admittedTier,
+            extension: admittedExtension,
+            toolCalls: budget.toolCalls,
+            workerTimeoutMs: budget.workerTimeoutMs,
+          };
     console.log(
-      `[stage ${config.stage} attempt ${attempt}] worker.started head=${preHead.slice(0, 8)}`,
+      `[stage ${config.stage} attempt ${attempt}] worker.started head=${preHead.slice(0, 8)} toolCalls=${budget.toolCalls}`,
     );
 
     const deadline = new Date(
-      Date.now() + config.workerTimeoutMs,
+      Date.now() + attemptConfig.workerTimeoutMs,
     ).toISOString();
     const updateAttempt = async (
       fields: Record<string, Json>,
@@ -1003,7 +1052,7 @@ async function superviseOwned(
       await updateAttempt({ lifecycle: event });
     };
     const execution = await executor.execute({
-      config: frozenConfig,
+      config: attemptConfig,
       attempt,
       failureReportPath,
       prefix,
@@ -1258,10 +1307,9 @@ async function superviseOwned(
         failureReason = "verifier left a dirty worktree";
         verifierIntegrityFailure = true;
       }
-      if (
-        failureReason === undefined &&
-        (workerReport?.knownGaps.length ?? 0) === 0
-      ) {
+      // Declared gaps are advisory and no longer withhold verification; they are
+      // recorded on the worker report and surfaced to the reviewer.
+      if (failureReason === undefined) {
         await checkpointCompletedAttempt(config.evidencePath, {
           attempt,
           artifacts,
@@ -1277,6 +1325,7 @@ async function superviseOwned(
               worker,
               protocol: execution.protocol ?? null,
               verification,
+              retry: thisAttemptRetry ?? null,
               workerReport: workerReport ?? null,
             }),
           ) as Record<string, Json>,
@@ -1289,22 +1338,42 @@ async function superviseOwned(
       }
     }
 
-    const knownGapsReported =
-      workerReport?.status === "complete" &&
-      workerReport.knownGaps.length > 0;
-    let taskBlocked =
-      !verifierIntegrityFailure &&
-      (decisionBlocked || (knownGapsReported && problem === undefined));
+    // Declared gaps no longer withhold acceptance: they are surfaced to the
+    // reviewer instead of halting the chain. An explicit blocked report still
+    // requires a caller decision.
+    let taskBlocked = !verifierIntegrityFailure && decisionBlocked;
     let blockageReason = decisionBlocked
       ? workerReport?.blocker?.decisionNeeded ?? "worker reported blocked"
-      : knownGapsReported
-        ? "worker reported known gaps: " + workerReport!.knownGaps.join("; ")
-        : undefined;
+      : undefined;
+    if (workerReport?.status === "complete" && workerReport.knownGaps.length > 0)
+      console.log(
+        `[stage ${config.stage} attempt ${attempt}] gaps=${workerReport.knownGaps.length} (advisory)`,
+      );
 
+    const failureClass = classifyFailure({
+      terminationReason: worker.terminationReason,
+      historyFailure: historyFailure !== undefined,
+      verifierIntegrityFailure,
+      workerBlocked: decisionBlocked,
+      failed: failureReason !== undefined,
+    });
+    // Progress is measured from the tree, never asked of the model: a new commit
+    // or uncommitted changes count; an untouched worktree does not.
+    const madeProgress = preHead !== postHead || postStatus !== "";
+    const retryInput = {
+      policy: retryPolicy,
+      state: retryState,
+      failure: failureClass,
+      base: baseBudget,
+      evaluatorConfigured: config.progressEvaluator !== undefined,
+      madeProgress,
+    };
     let progressEvaluation: ProgressEvaluationRecord | undefined;
+    let evaluatorVerdict: SoftVerdict | undefined;
     if (config.progressEvaluator && failureReason !== undefined && !taskBlocked &&
         historyFailure === undefined && !verifierIntegrityFailure &&
-        execution.protocol?.cleanupComplete === true && attempt < config.maxAttempts) {
+        execution.protocol?.cleanupComplete === true &&
+        needsEvaluator(retryInput)) {
       const evaluator = config.progressEvaluator;
       const previousHypotheses = attempts.flatMap((item) =>
         item.progressEvaluation?.nextHypothesis ? [item.progressEvaluation.nextHypothesis] : []);
@@ -1341,23 +1410,39 @@ async function superviseOwned(
         });
         const hypothesis = "nextHypothesis" in verdict ? verdict.nextHypothesis?.trim() : undefined;
         const normalize = (value: string) => value.toLowerCase().replace(/\s+/g, " ").trim();
-        const retryAllowed = verdict.status !== "escalate-infrastructure" && Boolean(hypothesis) &&
+        const distinct = Boolean(hypothesis) &&
           !previousHypotheses.some((previous) => normalize(previous) === normalize(hypothesis!));
+        const budgetExtend =
+          verdict.status === "progress" &&
+          failureClass === "budget-exhaustion" &&
+          madeProgress;
+        const retryAllowed =
+          verdict.status === "extend" || distinct || budgetExtend;
         progressEvaluation = {
           status: verdict.status,
           ...("reason" in verdict && verdict.reason ? { reason: verdict.reason } : {}),
           ...(hypothesis ? { nextHypothesis: hypothesis } : {}),
           evidencePath: inputArtifact.path, evaluatedAt: now(), retryAllowed,
         };
-        if (!retryAllowed) {
-          taskBlocked = true;
-          blockageReason = verdict.status === "escalate-infrastructure"
-            ? verdict.reason : "progress evaluator supplied no distinct next approach; caller review required";
-        }
+        const reason = progressEvaluation.reason;
+        evaluatorVerdict =
+          verdict.status === "extend"
+            ? { status: "extend", ...(reason === undefined ? {} : { reason }) }
+            : verdict.status === "escalate-infrastructure"
+              ? { status: "escalate-infrastructure", reason: verdict.reason }
+              : verdict.status === "stuck" && !distinct
+                ? { status: "stuck", ...(reason === undefined ? {} : { reason }) }
+                : distinct
+                  ? { status: "new-approach", distinct: true, ...(reason === undefined ? {} : { reason }) }
+                  : budgetExtend
+                    ? { status: "extend", ...(reason === undefined ? {} : { reason }) }
+                    : { status: "new-approach", distinct: false, ...(reason === undefined ? {} : { reason }) };
       } catch (error) {
         const reason = "progress evaluator failed: " + (error instanceof Error ? error.message : String(error));
         progressEvaluation = { status: "error", reason, evidencePath: prefix + "-worker.acp.jsonl",
           evaluatedAt: now(), retryAllowed: false };
+        // An unusable evaluator fails closed: the caller reviews rather than a
+        // retry running without a verdict.
         taskBlocked = true;
         blockageReason = reason;
       }
@@ -1366,6 +1451,34 @@ async function superviseOwned(
       await updateAttempt({ progressEvaluationPending: false,
         progressEvaluation: JSON.parse(JSON.stringify(progressEvaluation)) as Json });
       console.log(`[stage ${config.stage} attempt ${attempt}] evaluator.finished status=${progressEvaluation.status} retry=${progressEvaluation.retryAllowed}`);
+    }
+
+    // Retry policy decides whether another attempt runs, and under which budget.
+    const retryDecision =
+      failureReason === undefined || taskBlocked ||
+      historyFailure !== undefined || verifierIntegrityFailure
+        ? undefined
+        : decideRetry(
+            evaluatorVerdict === undefined
+              ? retryInput
+              : { ...retryInput, evaluatorVerdict },
+          );
+    if (retryDecision?.action === "stop") {
+      console.log(
+        `[stage ${config.stage} attempt ${attempt}] retry.stopped: ${retryDecision.reason}`,
+      );
+      if (retryDecision.blocked) {
+        taskBlocked = true;
+        blockageReason = retryDecision.reason;
+      }
+    }
+    if (retryDecision?.action === "retry") {
+      retryState = retryDecision.nextState;
+      admittedTier = retryDecision.tier;
+      admittedExtension = retryDecision.extension;
+      console.log(
+        `[stage ${config.stage} attempt ${attempt}] retry.${retryDecision.tier} extension=${retryDecision.extension} nextToolCalls=${retryDecision.nextBudget.toolCalls}`,
+      );
     }
 
     let currentFailureReportPath: string | undefined;
@@ -1406,6 +1519,7 @@ async function superviseOwned(
             accepted: false,
             failureReason,
             progressEvaluation,
+            retry: thisAttemptRetry ?? null,
             attempt,
             startedAt: attemptStartedAt,
             preHead,
@@ -1428,6 +1542,7 @@ async function superviseOwned(
             accepted: false,
             taskBlocked: true,
             progressEvaluation,
+            retry: thisAttemptRetry ?? null,
             blockageReason,
             attempt,
             startedAt: attemptStartedAt,
@@ -1444,6 +1559,7 @@ async function superviseOwned(
       });
     attempts.push({
       ...(progressEvaluation === undefined ? {} : { progressEvaluation }),
+      ...(thisAttemptRetry === undefined ? {} : { retry: thisAttemptRetry }),
       attempt,
       startedAt: attemptStartedAt,
       finishedAt: now(),
@@ -1508,6 +1624,7 @@ async function superviseOwned(
       );
       return record;
     }
+    if (retryDecision?.action === "stop") break;
     if (historyFailure !== undefined || verifierIntegrityFailure) {
       // Preserve the evidence and worktree for inspection; never reset or retry a rewrite.
       break;

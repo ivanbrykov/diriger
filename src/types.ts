@@ -153,7 +153,7 @@ export interface VerificationResult {
 }
 
 export interface ProgressEvaluationRecord {
-  readonly status: "progress" | "stuck" | "escalate-infrastructure" | "error";
+  readonly status: "progress" | "extend" | "stuck" | "escalate-infrastructure" | "error";
   readonly reason?: string;
   readonly nextHypothesis?: string;
   readonly evidencePath: string;
@@ -163,6 +163,13 @@ export interface ProgressEvaluationRecord {
 
 export interface AttemptRecord {
   readonly progressEvaluation?: ProgressEvaluationRecord;
+  /** Which retry tier admitted this attempt, and the budget it ran with. */
+  readonly retry?: {
+    readonly tier: "hard" | "soft";
+    readonly extension: boolean;
+    readonly toolCalls: number;
+    readonly workerTimeoutMs: number;
+  };
   readonly attempt: number;
   readonly startedAt: string;
   readonly finishedAt: string;
