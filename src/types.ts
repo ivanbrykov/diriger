@@ -51,12 +51,26 @@ export interface ManifestBudgets {
 
 export interface ManifestStage {
   readonly id: string;
+  /**
+   * Entry executable: the v3 `checks` entry point, or the legacy v2 verifier.
+   * Always an absolute path.
+   */
+  readonly verifierPath: string;
+  /** Legacy v2 verifier closure manifest, when one was declared. */
+  readonly verifierManifestPath?: string;
+  /**
+   * v3: every file under the `checks` path. Frozen and hashed as the closure, so
+   * the reviewed bytes are the tested bytes without a caller-declared schema.
+   */
+  readonly verifierFiles?: ReadonlyArray<string>;
+  /** v3: closure resolved from the `checks` path; absent when self-contained. */
+  readonly verifier?: {
+    readonly selfContained: boolean;
+    readonly dependencies?: ReadonlyArray<string>;
+    readonly snapshotRoot?: string;
+  };
   /** Absolute path, resolved against the manifest directory. */
   readonly planPath: string;
-  /** Absolute path, resolved against the manifest directory. */
-  readonly verifierPath: string;
-  /** Absolute path, resolved against the manifest directory. */
-  readonly verifierManifestPath?: string;
   /** Predecessor stage id; absent on the first stage. */
   readonly after?: string;
   /** Per-stage budget overrides. */
@@ -69,7 +83,7 @@ export interface ManifestStage {
  * one-stage manifest is the trivial case.
  */
 export interface RunManifest {
-  readonly version: 2;
+  readonly version: 2 | 3;
   /** Absolute path of the JSON document; relative paths resolve against it. */
   readonly manifestPath: string;
   readonly chainId: string;

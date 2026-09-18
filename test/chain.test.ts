@@ -190,6 +190,24 @@ describe("manifest-driven chain", () => {
     ).toBeTrue();
   }, 20_000);
 
+  test("a v3 checks manifest runs the checks entry and is accepted", async () => {
+    const f = await fixture(["only"]);
+    const raw = JSON.parse(await readFile(f.manifest, "utf8")) as {
+      version: number;
+      stages: ReadonlyArray<Record<string, unknown>>;
+    };
+    raw.version = 3;
+    raw.stages = raw.stages.map((stage) => ({
+      id: stage.id,
+      plan: stage.plan,
+      checks: stage.verifier,
+    }));
+    await writeFile(f.manifest, JSON.stringify(raw));
+    const state = await run(f);
+    expect(state.outcome).toBe("accepted");
+    expect(state.stages[0]!.status).toBe("accepted");
+  }, 20_000);
+
   test("refuses to reuse an existing evidence directory", async () => {
     const f = await fixture(["only"]);
     await run(f);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseRunManifest } from "../src/chain.js";
@@ -271,6 +271,110 @@ describe("parseRunManifest", () => {
       expect(parsed.retries.hard).toBe(3);
       expect(parsed.retries.soft).toBe(0);
       expect(parsed.budgets.maxAttempts).toBe(4);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a v3 checks file is a self-contained entry", async () => {
+    const { dir, manifest } = await writeManifest({
+      ...base,
+      version: 3,
+      stages: [{ id: "s1", plan: "plan.md", checks: "verify.sh" }],
+    });
+    try {
+      const parsed = await parseRunManifest(manifest);
+      expect(parsed.version).toBe(3);
+      const stage = parsed.stages[0]!;
+      expect(stage.verifierPath).toBe(join(dir, "verify.sh"));
+      expect(stage.verifierFiles).toEqual([join(dir, "verify.sh")]);
+      expect(stage.verifier).toEqual({ selfContained: true });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a v3 checks directory freezes every file and picks run.sh", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "diriger-manifest-"));
+    try {
+      await mkdir(join(dir, "checks", "lib"), { recursive: true });
+      await writeFile(join(dir, "checks", "run.sh"), "#!/bin/sh\n");
+      await writeFile(join(dir, "checks", "probe.sh"), "#!/bin/sh\n");
+      await writeFile(join(dir, "checks", "lib", "a.mjs"), "export {};\n");
+      await writeFile(join(dir, "plan.md"), "x");
+      const manifest = join(dir, "manifest.json");
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          version: 3,
+          repository: "repo",
+          evidence: "evidence",
+          worker: { command: ["worker"] },
+          stages: [{ id: "s1", plan: "plan.md", checks: "checks" }],
+        }),
+      );
+      const stage = (await parseRunManifest(manifest)).stages[0]!;
+      expect(stage.verifierPath).toBe(join(dir, "checks", "run.sh"));
+      expect(stage.verifierFiles).toEqual([
+        join(dir, "checks", "lib", "a.mjs"),
+        join(dir, "checks", "probe.sh"),
+        join(dir, "checks", "run.sh"),
+      ]);
+      expect(stage.verifier).toEqual({
+        selfContained: false,
+        dependencies: [
+          join(dir, "checks", "lib", "a.mjs"),
+          join(dir, "checks", "probe.sh"),
+        ],
+        snapshotRoot: join(dir, "checks"),
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a checks directory without an entry, and checks combined with verifier", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "diriger-manifest-"));
+    try {
+      await mkdir(join(dir, "checks"));
+      await writeFile(join(dir, "checks", "probe.sh"), "#!/bin/sh\n");
+      await writeFile(join(dir, "plan.md"), "x");
+      await writeFile(join(dir, "verify.sh"), "x");
+      const noEntry = join(dir, "no-entry.json");
+      await writeFile(
+        noEntry,
+        JSON.stringify({
+          version: 3,
+          repository: "repo",
+          evidence: "evidence",
+          worker: { command: ["worker"] },
+          stages: [{ id: "s1", plan: "plan.md", checks: "checks" }],
+        }),
+      );
+      await expect(parseRunManifest(noEntry)).rejects.toThrow(
+        /must contain run\.sh or run/,
+      );
+      const both = join(dir, "both.json");
+      await writeFile(
+        both,
+        JSON.stringify({
+          version: 3,
+          repository: "repo",
+          evidence: "evidence",
+          worker: { command: ["worker"] },
+          stages: [
+            {
+              id: "s1",
+              plan: "plan.md",
+              checks: "verify.sh",
+              verifier: "verify.sh",
+            },
+          ],
+        }),
+      );
+      await expect(parseRunManifest(both)).rejects.toThrow(
+        "cannot set both checks and verifier",
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

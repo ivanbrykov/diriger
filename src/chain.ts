@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdir, open, readFile, rename } from "node:fs/promises";
+import { access, mkdir, open, readdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { DEFAULT_RETRY_POLICY, type RetryPolicy } from "./retry.js";
 import { resumeSupervision, supervise } from "./supervisor.js";
@@ -29,6 +29,7 @@ const BUDGET_KEYS = {
 const STAGE_KEYS = [
   "id",
   "plan",
+  "checks",
   "verifier",
   "verifierManifest",
   "after",
@@ -178,16 +179,82 @@ function parseRetries(
   return { policy: { hard, soft, extend }, maxAttempts: 1 + hard + soft };
 }
 
-function parseManifestValue(
+/**
+ * Resolve a v3 `checks` path into the frozen closure the supervisor expects.
+ * A file is a self-contained entry; a directory must contain `run.sh` or `run`
+ * as its entry, and every other file under it becomes a frozen dependency. The
+ * caller declares no closure schema — Diriger enumerates and hashes the path.
+ */
+async function resolveChecks(
+  checksPath: string,
+  where: string,
+  strict: boolean,
+): Promise<{
+  readonly entryPath: string;
+  readonly files: ReadonlyArray<string>;
+  readonly closure: ManifestStage["verifier"];
+}> {
+  let details;
+  try {
+    details = await stat(checksPath);
+  } catch {
+    if (strict) throw new ChainError(`${where} is unreadable: ${checksPath}`);
+    return { entryPath: checksPath, files: [checksPath], closure: undefined };
+  }
+  if (details.isFile())
+    return {
+      entryPath: checksPath,
+      files: [checksPath],
+      closure: { selfContained: true },
+    };
+  if (!details.isDirectory())
+    throw new ChainError(`${where} must be a file or directory: ${checksPath}`);
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of [...entries].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile()) files.push(full);
+    }
+  };
+  await walk(checksPath);
+  if (files.length === 0)
+    throw new ChainError(`${where} contains no files: ${checksPath}`);
+  const entryPath = files.find((file) => {
+    const name = basename(file);
+    return name === "run.sh" || name === "run";
+  });
+  if (entryPath === undefined)
+    throw new ChainError(
+      `${where} must contain run.sh or run as its entry: ${checksPath}`,
+    );
+  const dependencies = files.filter((file) => file !== entryPath);
+  return {
+    entryPath,
+    files,
+    closure: {
+      selfContained: false,
+      dependencies,
+      snapshotRoot: checksPath,
+    },
+  };
+}
+
+async function parseManifestValue(
   raw: unknown,
   manifestPath: string,
   base: string,
-): RunManifest {
+  strict: boolean,
+): Promise<RunManifest> {
   if (!rec(raw)) throw new ChainError("invalid manifest");
   for (const key of Object.keys(raw))
     if (!(TOP_KEYS as ReadonlyArray<string>).includes(key))
       throw new ChainError(`unknown manifest key: ${key}`);
-  if (raw.version !== 2) throw new ChainError("manifest version must be 2");
+  if (raw.version !== 2 && raw.version !== 3)
+    throw new ChainError("manifest version must be 2 or 3");
   for (const key of ["chain", "runId"] as const)
     if (raw[key] !== undefined) text(raw[key], `manifest ${key}`);
 
@@ -258,27 +325,55 @@ function parseManifestValue(
       ),
       `stages[${index}]`,
     );
-    stages.push({
-      id: entry.id,
-      planPath: pathOf(entry.plan, `stages[${index}].plan`),
-      verifierPath: pathOf(entry.verifier, `stages[${index}].verifier`),
-      ...(entry.verifierManifest === undefined
-        ? {}
-        : {
-            verifierManifestPath: pathOf(
-              entry.verifierManifest,
-              `stages[${index}].verifierManifest`,
-            ),
-          }),
-      ...(after === undefined ? {} : { after }),
-      ...(Object.keys(stageBudgets).length === 0
-        ? {}
-        : { budgets: stageBudgets }),
-    });
+    let stage: ManifestStage;
+    if (entry.checks !== undefined) {
+      if (entry.verifier !== undefined || entry.verifierManifest !== undefined)
+        throw new ChainError(
+          `stages[${index}] cannot set both checks and verifier`,
+        );
+      const checksPath = pathOf(entry.checks, `stages[${index}].checks`);
+      const resolved = await resolveChecks(
+        checksPath,
+        `stages[${index}].checks`,
+        strict,
+      );
+      stage = {
+        id: entry.id,
+        planPath: pathOf(entry.plan, `stages[${index}].plan`),
+        verifierPath: resolved.entryPath,
+        verifierFiles: resolved.files,
+        ...(resolved.closure === undefined
+          ? {}
+          : { verifier: resolved.closure }),
+        ...(after === undefined ? {} : { after }),
+        ...(Object.keys(stageBudgets).length === 0
+          ? {}
+          : { budgets: stageBudgets }),
+      };
+    } else {
+      stage = {
+        id: entry.id,
+        planPath: pathOf(entry.plan, `stages[${index}].plan`),
+        verifierPath: pathOf(entry.verifier, `stages[${index}].verifier`),
+        ...(entry.verifierManifest === undefined
+          ? {}
+          : {
+              verifierManifestPath: pathOf(
+                entry.verifierManifest,
+                `stages[${index}].verifierManifest`,
+              ),
+            }),
+        ...(after === undefined ? {} : { after }),
+        ...(Object.keys(stageBudgets).length === 0
+          ? {}
+          : { budgets: stageBudgets }),
+      };
+    }
+    stages.push(stage);
   }
 
   return {
-    version: 2,
+    version: raw.version === 3 ? 3 : 2,
     manifestPath,
     chainId:
       typeof raw.runId === "string"
@@ -313,10 +408,11 @@ export async function parseRunManifest(path: string): Promise<RunManifest> {
   } catch {
     throw new ChainError(`manifest must be readable JSON: ${manifestPath}`);
   }
-  const manifest = parseManifestValue(
+  const manifest = await parseManifestValue(
     raw,
     manifestPath,
     dirname(manifestPath),
+    true,
   );
   for (const stage of manifest.stages) {
     for (const [label, file] of [
@@ -339,11 +435,12 @@ export async function parseRunManifest(path: string): Promise<RunManifest> {
 }
 
 /** Rebuild the manifest recorded in a frozen chain without re-reading inputs. */
-function manifestFromFrozen(frozen: FrozenChain): RunManifest {
-  return parseManifestValue(
+async function manifestFromFrozen(frozen: FrozenChain): Promise<RunManifest> {
+  return await parseManifestValue(
     frozen.manifest,
     frozen.manifestPath,
     dirname(frozen.manifestPath),
+    false,
   );
 }
 
@@ -535,9 +632,8 @@ export async function createFrozenChain(
   const files: FrozenChainFile[] = [];
   for (const stage of manifest.stages) {
     files.push(await freezeFile(manifestDir, stage.planPath, "plan", stage.id));
-    files.push(
-      await freezeFile(manifestDir, stage.verifierPath, "verifier", stage.id),
-    );
+    for (const file of stage.verifierFiles ?? [stage.verifierPath])
+      files.push(await freezeFile(manifestDir, file, "verifier", stage.id));
     if (stage.verifierManifestPath !== undefined)
       files.push(
         await freezeFile(
@@ -690,9 +786,10 @@ async function stageConfig(
   previous: StageRun | undefined,
 ): Promise<SupervisorConfig> {
   const closure =
-    stage.verifierManifestPath === undefined
+    stage.verifier ??
+    (stage.verifierManifestPath === undefined
       ? undefined
-      : await loadVerifierManifestClosure(stage.verifierManifestPath);
+      : await loadVerifierManifestClosure(stage.verifierManifestPath));
   return {
     repositoryPath: manifest.repositoryPath,
     planPath: stage.planPath,
