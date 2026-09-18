@@ -54,11 +54,14 @@ stages; ordinary whole-task authorization does not require asking again for each
 stage. This workflow is caller-driven; Diriger does not schedule the stage graph.
 
 Prepare a clean dedicated Git tree, a clear plan, and an executable independent
-verifier outside the tree. Diriger requires a new descendant commit on the same
-branch and a clean tree. The verifier must leave the exact HEAD/ref and tree
-unchanged. It receives `SAMOVAR_BENCH_REPO` and the stage as its first argument.
-Declare verifier dependencies in the stage's `verifierManifest` when it is not
-self-contained; inspect the installed release README for that manifest schema.
+check run outside the tree. Diriger requires a new descendant commit on the same
+branch and a clean tree. The checks must leave the exact HEAD/ref and tree
+unchanged. They receive `SAMOVAR_BENCH_REPO` and the stage as their first two
+arguments. Point the stage's `checks` at the check file or directory; Diriger
+freezes and hashes everything under that path, so there is no dependency manifest
+to declare and no `verifierManifest`. Write the stage's definition of done into
+the plan — the worker reads it while working and the reviewer reads it when
+judging the result.
 
 Diriger is configured entirely by one version-2 JSON manifest; there are no run
 flags. It lists the repository, a fresh evidence directory, the worker command,
@@ -82,7 +85,7 @@ placeholders — see the warning below):
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "chain": "task-name",
   "repository": "/absolute/remote/worktree",
   "evidence": "/absolute/remote/new-evidence",
@@ -98,7 +101,7 @@ placeholders — see the warning below):
     "maxToolRepetitions": 8
   },
   "stages": [
-    { "id": "s1", "plan": "stages/s1.md", "verifier": "stages/s1.verify.sh" }
+    { "id": "s1", "plan": "stages/s1.md", "checks": "verification/" }
   ]
 }
 ```
@@ -159,7 +162,7 @@ provides the attempt-specific output path and schema in the ACP prompt or bundle
 recipe. The report includes status complete/blocked, summary, knownGaps, decisions,
 and validation; blocked also requires assumption, evidence, attempted approaches,
 smallest alternative, and needed caller decision. Report generation is part of the
-worker's normal completion, not a replacement for the independent verifier.
+worker's normal completion, not a replacement for the independent checks.
 
 `task-blocked` (exit 4) stops automatic retries and remains terminal on resume.
 An explicit blocked report is the only outcome that withholds acceptance this

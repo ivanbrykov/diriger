@@ -89,8 +89,9 @@ Ordered implementation steps:
 (Replace these generic descriptions with task-specific actions and checkpoints.)
 
 Acceptance and return:
-- Exact commands plus expected behavior, including negative/concurrency cases
-  where relevant; independent verifier location and dependencies.
+- Definition of done: the observable behaviors that must hold, written into the
+  plan. Exact commands plus expected behavior, including negative/concurrency cases
+  where relevant; the checks file or directory that executes them.
 - Required evidence, structured report and clean descendant-commit requirements.
 - Explicitly excluded future work and known validation limits.
 
@@ -107,10 +108,11 @@ in the actual handoff; references to a skill the worker cannot read are insuffic
 
 Use verified absolute remote paths for supporting material. Stage and identify
 all required inputs, including prior probes and framework source availability.
-Distinguish missing dependencies from failed code. Preflight the verifier and its
+Distinguish missing dependencies from failed code. Preflight the checks and their
 fixtures before spending model time: a failure caused by bad paths, unsupported
 runner configuration or broken oracle setup must not be scored as worker failure.
-Declare verifier dependencies for freezing as described in [execution.md](execution.md).
+Diriger freezes and hashes everything under the stage's `checks` path, so place
+helpers beside the entry rather than declaring them separately.
 
 ## Budget sizing and cushion
 
@@ -150,11 +152,12 @@ whole transcripts or making each stage rediscover the same libraries.
 ### Chain handoff: submit the whole stage chain in one manifest
 
 Per-stage caller review is the default because it catches drift early. When every
-stage's acceptance is fully encoded in its verifier, that review adds little: the
+stage's acceptance is fully encoded in its checks and its definition of done, that
+review adds little: the
 machinery can gate progression instead. You may prepare and submit the entire
 dependency-ordered chain in one handoff when ALL of the following hold:
 
-- Every stage has a strong independent verifier that covers its acceptance
+- Every stage has a strong independent check run that covers its acceptance
   criteria; "caller would want to look at the diff first" is not encoded anywhere.
 - Each stage brief is self-sufficient: it does not depend on how an earlier
   worker happened to implement its stage, or it says exactly what to read from
@@ -171,11 +174,11 @@ writes the whole manifest and submits it once:
 exec /home/ivan/.local/bin/diriger run /absolute/remote/task/manifest.json
 ```
 
-Diriger freezes the manifest, every stage brief, verifier and the worker prompt
+Diriger freezes the manifest, every stage brief, its checks and the worker prompt
 before the first worker starts, then runs the stages sequentially. Each stage
 begins from its predecessor's accepted commit, receives that commit SHA and the
 predecessor's worker report through the prompt handoff variables, and is accepted
-only when its own report/Git/verifier gates pass. The first non-accepted stage
+only when its own report/Git/checks gates pass. The first non-accepted stage
 halts the chain with durable per-stage evidence; `diriger resume <evidence>`
 continues from the first non-accepted stage without re-running accepted ones.
 The whole-task budget still applies across the chain; give each stage its own

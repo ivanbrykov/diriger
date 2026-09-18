@@ -51,7 +51,7 @@ already small enough may remain one stage; bounded investigation can be a separa
 stage with an explicit question and proceed/BLOCKED gate.
 
 Review each stage's result before launching dependent work and carry verified
-findings forward — or, when every stage's acceptance is fully verifier-encoded,
+findings forward — or, when every stage's acceptance is fully checks-encoded,
 submit the whole chain at once as one manifest with stop-on-first-failure gating
 (see
 [chain handoff](references/decomposition.md#chain-handoff-submit-the-whole-stage-chain-in-one-manifest)).
@@ -72,11 +72,11 @@ instructions in the handoff. The worker does not automatically inherit this skil
    effect of an ordinary task. Read the remote `/data/work/AGENTS.md` and any
    applicable repository policy before staging work.
 3. For implementation, prepare a dedicated remote local-disk checkout/worktree from an
-   exact base commit. Keep task inputs, verifier, and evidence outside its mutable
+   exact base commit. Keep task inputs, checks, and evidence outside its mutable
    tree. Transfer only task-relevant material. Use Git fetch/bundles for commits;
    handle required uncommitted inputs explicitly instead of silently omitting
    them. Never sync a live `.git` directory or let two agents write the same tree.
-4. For implementation, preflight the stage inputs and verifier before submission. Read
+4. For implementation, preflight the stage inputs and checks before submission. Read
    [current execution tools](references/execution.md). Use the selected
    execution tool appropriate to the task: ordinary commands for a test/build,
    the supervised coding worker for implementation. Set finite time/attempt limits.
