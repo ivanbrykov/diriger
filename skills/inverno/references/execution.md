@@ -88,8 +88,8 @@ placeholders — see the warning below):
   "evidence": "/absolute/remote/new-evidence",
   "worker": { "command": ["<pinned OMP argv from acp-command.json>"] },
   "evaluator": { "command": ["<pinned evaluator argv from evaluator-command.json>"], "timeoutSeconds": 120 },
+  "retries": { "hard": 2, "soft": 3, "extend": { "toolCalls": 0.5, "timeout": 0.5, "ceiling": 3 } },
   "defaults": {
-    "maxAttempts": 2,
     "workerTimeoutSeconds": 1800,
     "noToolTimeoutSeconds": 90,
     "noToolOutputBytes": 262144,
@@ -119,6 +119,17 @@ The same arrays are published verbatim in [OMP configuration](omp.md) and are
 fingerprinted by the run's worker profile. Prefer a first/only stage for an
 ordinary task; add stages only when the acceptance checks are genuinely
 independent.
+
+`retries` controls how a failed attempt may be repeated. `hard` retries are
+unconditional and never consult the evaluator; `soft` retries require the
+evaluator's verdict; each `extend` verdict adds a fraction of the stage's base
+budget to the next attempt, capped at `ceiling` multiples of base. The total
+attempt cap is `1 + hard + soft`, and `defaults.maxAttempts` is still accepted as
+the legacy spelling (mapped to hard retries). Budget exhaustion — a wall timeout
+or a tool-call limit — goes straight to the evaluator instead of repeating at the
+same budget, and an extension is granted only when the attempt left real progress
+in the tree. Size `maxToolCalls` for the median attempt and let the policy cover
+the tail; `extend` is not a licence to merge stages.
 
 The worker and evaluator commands are frozen as part of the manifest; see
 [OMP configuration](omp.md) for the pinned OMP argv and the local evaluator.
@@ -151,8 +162,10 @@ smallest alternative, and needed caller decision. Report generation is part of t
 worker's normal completion, not a replacement for the independent verifier.
 
 `task-blocked` (exit 4) stops automatic retries and remains terminal on resume.
-A complete report with known gaps cannot receive automatic acceptance even with
-green checks. Read the report in the stage's `run.json`/immutable attempt artifacts
+An explicit blocked report is the only outcome that withholds acceptance this
+way; declared known gaps are advisory and travel with the worker report to the
+reviewer, who decides. Read the report in the stage's `run.json`/immutable attempt
+artifacts
 (`<evidence>/stages/<id>/` for a chain) and return the
 unresolved decision/gaps to the caller. Pueue may label this Failed(4); do not restart
 it blindly. Ownership/recovery safety blockage remains exit 3. A crash with a pending
@@ -204,8 +217,9 @@ For a chain, `resume` keeps accepted stages and continues from the first
 non-accepted stage. Existing task authorization covers routine safe recovery within
 the original budget. Never delete locks to force progress, kill another task, reset
 the worktree, or rerun `run` into a new evidence directory just to reset attempts.
-Terminal failure is a reportable outcome; expanding scope/budgets requires the user's
-direction.
+Terminal failure is a reportable outcome. Bounded budget escalation is
+authorized up front by `retries.extend`; growing scope, or a budget beyond the
+policy's ceiling, still requires the user's direction.
 
 Diriger exits: 0 accepted/ready/preview, 1 terminal failure, 2 invalid input/state,
 3 active or safety-blocked, 4 task-blocked. An accepted resume reuses proof; other resumes can verify

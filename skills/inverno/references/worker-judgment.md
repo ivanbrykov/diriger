@@ -73,8 +73,9 @@ The worker must write the supplied report schema and finish its session normally
 the word BLOCKED in prose alone is not a machine-readable outcome.
 
 An evidence-backed blocked report produces `task-blocked` (exit 4), preserves useful
-work, and stops automatic retries. A completed report's known gaps withhold acceptance
-even when the verifier passes. Process, history, cleanup, and verifier-integrity
+work, and stops automatic retries. Declared known gaps are advisory: they travel
+with the report to the reviewer instead of withholding acceptance. Process,
+history, cleanup, and verifier-integrity
 failures retain priority. Recovery may safety-block (exit 3) when a pending report
 exists but normal worker completion is unproven; do not bypass that check.
 

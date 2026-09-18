@@ -123,6 +123,12 @@ needs roughly 120, not 80. Diriger grants a finalize cushion by default
 safety net, not budget headroom: size the main budget so the cushion is rarely
 used.
 
+`retries` covers the tail instead of a worst-case guess. Size `maxToolCalls` for
+the median attempt and let an evaluator-granted `extend` add room when an attempt
+is genuinely progressing; the policy's `ceiling` bounds it. A stage that needs
+more scope still gets split — `extend` buys room for the same approach, not a
+bigger task.
+
 ## 4. Caller readiness gate, then one stage at a time
 
 Do not submit implementation until the caller can answer:
