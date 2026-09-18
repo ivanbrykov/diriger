@@ -1,4 +1,4 @@
-import { evaluateProgress, serializeProgressEvidence } from "./progress-evaluator.js";
+import { evaluateProgress, ProgressEvaluatorError, serializeProgressEvidence } from "./progress-evaluator.js";
 import { buildProgressEvidence } from "./progress-evidence.js";
 import {
   attemptBudget,
@@ -1188,15 +1188,21 @@ async function superviseOwned(
       postHead,
       originalRef,
     );
+    const workerIssue = workerProblem(
+      worker.exitCode,
+      worker.terminationReason,
+      preHead,
+      postHead,
+      postStatus,
+    );
+    // A retry may legitimately leave the candidate unchanged: a previous attempt
+    // already committed it and this worker concluded nothing needed changing.
+    // Re-verify that candidate rather than failing for lack of a new commit.
+    const candidateUnchanged =
+      workerIssue === "worker produced no new commit" &&
+      attempts.some((item) => item.postHead === preHead);
     const normalProblem =
-      historyFailure ??
-      workerProblem(
-        worker.exitCode,
-        worker.terminationReason,
-        preHead,
-        postHead,
-        postStatus,
-      );
+      historyFailure ?? (candidateUnchanged ? undefined : workerIssue);
 
     // A decision-blocked outcome is authoritative only after a normal process
     // completion and intact history. It may deliberately leave work uncommitted
@@ -1438,13 +1444,15 @@ async function superviseOwned(
                     ? { status: "extend", ...(reason === undefined ? {} : { reason }) }
                     : { status: "new-approach", distinct: false, ...(reason === undefined ? {} : { reason }) };
       } catch (error) {
-        const reason = "progress evaluator failed: " + (error instanceof Error ? error.message : String(error));
+        const kind = error instanceof ProgressEvaluatorError ? error.kind : "error";
+        const message = error instanceof Error ? error.message : String(error);
+        const reason = `progress evaluator ${kind}: ${message}`;
         progressEvaluation = { status: "error", reason, evidencePath: prefix + "-worker.acp.jsonl",
           evaluatedAt: now(), retryAllowed: false };
-        // An unusable evaluator fails closed: the caller reviews rather than a
-        // retry running without a verdict.
-        taskBlocked = true;
-        blockageReason = reason;
+        // An unusable evaluator is infrastructure, not a verdict about the work.
+        // The retry policy decides: an unconditional retry if one remains, else
+        // stop for caller review.
+        evaluatorVerdict = { status: "unavailable", reason };
       }
       artifacts.push(await writeAttemptArtifact(config.evidencePath, attempt,
         "progress-evaluation.json", JSON.parse(JSON.stringify(progressEvaluation)) as Json));

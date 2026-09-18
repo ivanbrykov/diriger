@@ -277,7 +277,9 @@ async function parseManifestValue(
     for (const key of Object.keys(raw.evaluator))
       if (!["command", "timeoutSeconds"].includes(key))
         throw new ChainError(`unknown manifest key: evaluator.${key}`);
-    const timeoutSeconds = raw.evaluator.timeoutSeconds ?? 120;
+    // A slow local model can exceed two minutes on a large evidence envelope;
+    // the supervisor's limit is the single timeout authority.
+    const timeoutSeconds = raw.evaluator.timeoutSeconds ?? 300;
     if (
       typeof timeoutSeconds !== "number" ||
       !Number.isSafeInteger(timeoutSeconds) ||

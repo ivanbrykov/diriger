@@ -147,6 +147,30 @@ describe("decideRetry", () => {
     expect(duplicate).toMatchObject({ action: "stop", blocked: true });
   });
 
+  test("an unavailable evaluator falls back to an unconditional retry", () => {
+    const decision = decide({
+      failure: "budget-exhaustion",
+      evaluatorConfigured: true,
+      evaluatorVerdict: { status: "unavailable", reason: "timeout" },
+    });
+    expect(decision).toMatchObject({
+      action: "retry",
+      tier: "hard",
+      extension: false,
+      nextBudget: base,
+    });
+  });
+
+  test("an unavailable evaluator stops for review when no retry remains", () => {
+    const decision = decide({
+      policy: policy({ hard: 0, soft: 3 }),
+      state: state({ softUsed: 1 }),
+      failure: "budget-exhaustion",
+      evaluatorVerdict: { status: "unavailable" },
+    });
+    expect(decision).toMatchObject({ action: "stop", blocked: true });
+  });
+
   test("stuck and escalate stop with a caller decision", () => {
     for (const status of ["stuck", "escalate-infrastructure"] as const) {
       const decision = decide({

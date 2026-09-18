@@ -75,7 +75,9 @@ export type SoftVerdict =
       readonly distinct: boolean;
     }
   | { readonly status: "stuck"; readonly reason?: string }
-  | { readonly status: "escalate-infrastructure"; readonly reason?: string };
+  | { readonly status: "escalate-infrastructure"; readonly reason?: string }
+  /** The evaluator could not produce a verdict (error or timeout). */
+  | { readonly status: "unavailable"; readonly reason?: string };
 
 export interface RetryInput {
   readonly policy: RetryPolicy;
@@ -192,6 +194,26 @@ export function decideRetry(input: RetryInput): RetryDecision {
     if (verdict === undefined)
       return stop("soft retry requires an evaluator verdict");
     const detail = verdict.reason === undefined ? "" : `: ${verdict.reason}`;
+    // An unusable evaluator is an infrastructure failure, not a verdict about
+    // the work. Do not extend without evidence, but do not kill the chain while
+    // an unconditional retry remains.
+    if (verdict.status === "unavailable") {
+      if (hardRemaining > 0) {
+        const nextState: RetryState = {
+          ...state,
+          hardUsed: state.hardUsed + 1,
+        };
+        return {
+          action: "retry",
+          tier: "hard",
+          extension: false,
+          nextState,
+          nextBudget: attemptBudget(base, nextState.extensions, policy),
+          reason: "evaluator unavailable; unconditional retry" + detail,
+        };
+      }
+      return stop("evaluator unavailable and no retry remains" + detail, true);
+    }
     if (verdict.status === "escalate-infrastructure")
       return stop("evaluator reported an infrastructure problem" + detail, true);
     if (verdict.status === "stuck")

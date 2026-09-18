@@ -475,6 +475,52 @@ time.sleep(30)
   expect(result.attempts[1]?.retry?.workerTimeoutMs).toBeGreaterThan(3_000);
 }, 40_000);
 
+test("an unavailable evaluator falls back to a hard retry before blocking", async () => {
+  const { config, agent } = await fixture();
+  // Overruns the wall limit after leaving work, so the attempt is budget exhaustion.
+  await writeAgent(agent, `import time
+open(repo + '/partial.txt', 'w').write('wip\\n')
+time.sleep(30)
+`);
+  const evaluator = await installEvaluator(agent, `import sys\nsys.exit(1)`);
+  const result = await supervise({ ...config,
+    workerTimeoutMs: 2_000,
+    maxAttempts: 3,
+    retryPolicy: { hard: 1, soft: 1, extend: { toolCalls: 0.5, timeout: 0.5, ceiling: 3 } },
+    progressEvaluator: { command: ["python3", evaluator], timeoutMs: 2000 } });
+  expect(result.attempts).toHaveLength(2);
+  expect(result.attempts[0]?.progressEvaluation?.status).toBe("error");
+  expect(result.attempts[1]?.retry?.tier).toBe("hard");
+  // The evaluator never produced a verdict, so the stage stops for review rather
+  // than pretending the work was judged.
+  expect(result.status).toBe("task-blocked");
+}, 40_000);
+
+test("a retry that leaves the candidate unchanged re-verifies it", async () => {
+  const { config, agent } = await fixture();
+  const counter = join(config.repositoryPath, "..", "verify-count");
+  // Fails the first time, passes afterwards: models a check that was broken
+  // rather than a candidate that was wrong.
+  await writeFile(
+    config.verifierPath,
+    `#!/usr/bin/env bash\nset -euo pipefail\nn=$(cat ${counter} 2>/dev/null || echo 0)\necho $((n+1)) > ${counter}\nif [[ "$n" == "0" ]]; then echo "flaky check"; exit 1; fi\ntest "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = correct\n`,
+  );
+  await chmod(config.verifierPath, 0o755);
+  await writeAgent(agent, `import subprocess, pathlib
+marker = pathlib.Path(repo) / 'attempted'
+if not marker.exists():
+    marker.write_text('1')
+    open(repo + '/result.txt', 'w').write('correct\\n')
+    subprocess.run(['git','add','-A'], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['git','-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','correct'], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+`);
+  const result = await supervise({ ...config, maxAttempts: 2 });
+  expect(result.status).toBe("accepted");
+  expect(result.attempts).toHaveLength(2);
+  expect(result.attempts[1]?.preHead).toBe(result.attempts[1]?.postHead);
+  expect(result.attempts[1]?.verification?.exitCode).toBe(0);
+}, 30_000);
+
 test("boundary gate rejects a repeated hypothesis before spending a third attempt", async () => {
   const { config, agent } = await fixture();
   await writeAgent(agent, `import pathlib,subprocess

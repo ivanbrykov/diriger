@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 // Fresh, tool-free OpenAI-compatible assessment. Node 24; no dependencies.
-// argv: BASE_URL MODEL SYSTEM_PROMPT_FILE [MAX_OUTPUT_TOKENS]
+// argv: BASE_URL MODEL SYSTEM_PROMPT_FILE [MAX_OUTPUT_TOKENS] [TIMEOUT_MS]
 import {readFile} from 'node:fs/promises';
-const [baseUrl,model,promptFile,maxTokensText='4096']=process.argv.slice(2);
-if(!baseUrl||!model||!promptFile)throw new Error('Expected BASE_URL MODEL SYSTEM_PROMPT_FILE [MAX_OUTPUT_TOKENS]');
+const [baseUrl,model,promptFile,maxTokensText='4096',timeoutMsText='600000']=process.argv.slice(2);
+if(!baseUrl||!model||!promptFile)throw new Error('Expected BASE_URL MODEL SYSTEM_PROMPT_FILE [MAX_OUTPUT_TOKENS] [TIMEOUT_MS]');
 const maxTokens=Number(maxTokensText);
 if(!Number.isSafeInteger(maxTokens)||maxTokens<1)throw new Error('Invalid output token limit');
+// Default well above the supervisor's evaluator wall limit, so the supervisor's
+// timeout (and its guarded cleanup) is the single timeout authority. A shorter
+// internal abort here would surface as a generic evaluator failure instead.
+const timeoutMs=Number(timeoutMsText);
+if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1)throw new Error('Invalid timeout');
 const chunks=[];let bytes=0;
 for await(const chunk of process.stdin){bytes+=chunk.length;if(bytes>65536)throw new Error('Evidence exceeds 64KiB');chunks.push(chunk)}
 const evidence=Buffer.concat(chunks).toString('utf8');
@@ -15,7 +20,7 @@ const system=await readFile(promptFile,'utf8');
 const response=await fetch(baseUrl.replace(/\/$/,'')+'/chat/completions',{
  method:'POST',headers:{'content-type':'application/json'},
  body:JSON.stringify({model,messages:[{role:'system',content:system},{role:'user',content:evidence}],stream:false,max_tokens:maxTokens,response_format:{type:'json_object'}}),
- signal:AbortSignal.timeout(110000),
+ signal:AbortSignal.timeout(timeoutMs),
 });
 if(!response.ok)throw new Error('Evaluator provider returned HTTP '+response.status);
 let responseBytes=0;const parts=[];

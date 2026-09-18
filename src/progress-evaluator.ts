@@ -445,10 +445,21 @@ export async function evaluateProgress(
     // evaluator execution time; retain a timeout that already fired, though.
     clearTimeout(timeout);
     await cleanup(); // also reaps same-group descendants after a nominally successful leader exit
-    const [stdoutBytes] = await Promise.all([stdout, stderr]);
+    const [stdoutBytes, stderrBytes] = await Promise.all([stdout, stderr]);
     if (failure !== undefined) throw failure;
-    if (exitCode !== 0)
-      throw new ProgressEvaluatorError("nonzero-exit", `evaluator exited with status ${exitCode}`);
+    if (exitCode !== 0) {
+      // The captured stderr is the only place an adapter explains itself; keep a
+      // bounded tail so the recorded failure is diagnosable without a repro.
+      const tail = new TextDecoder("utf-8", { fatal: false })
+        .decode(stderrBytes)
+        .trim()
+        .slice(-400);
+      throw new ProgressEvaluatorError(
+        "nonzero-exit",
+        `evaluator exited with status ${exitCode}` +
+          (tail === "" ? "" : `: ${tail}`),
+      );
+    }
     let decoded: string;
     try {
       decoded = new TextDecoder("utf-8", { fatal: true }).decode(stdoutBytes);
