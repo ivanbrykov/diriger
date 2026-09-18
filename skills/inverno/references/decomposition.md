@@ -112,7 +112,9 @@ Distinguish missing dependencies from failed code. Preflight the checks and thei
 fixtures before spending model time: a failure caused by bad paths, unsupported
 runner configuration or broken oracle setup must not be scored as worker failure.
 Diriger freezes and hashes everything under the stage's `checks` path, so place
-helpers beside the entry rather than declaring them separately.
+helpers beside the entry rather than declaring them separately. Checks execute
+from that frozen snapshot: anchor external tooling to `$SAMOVAR_BENCH_REPO`
+(or the task directory above it), never to the script's own location.
 
 ## Budget sizing and cushion
 

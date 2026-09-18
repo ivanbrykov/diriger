@@ -90,7 +90,7 @@ placeholders — see the warning below):
   "repository": "/absolute/remote/worktree",
   "evidence": "/absolute/remote/new-evidence",
   "worker": { "command": ["<pinned OMP argv from acp-command.json>"] },
-  "evaluator": { "command": ["<pinned evaluator argv from evaluator-command.json>"], "timeoutSeconds": 120 },
+  "evaluator": { "command": ["<pinned evaluator argv from evaluator-command.json>"], "timeoutSeconds": 300 },
   "retries": { "hard": 2, "soft": 3, "extend": { "toolCalls": 0.5, "timeout": 0.5, "ceiling": 3 } },
   "defaults": {
     "workerTimeoutSeconds": 1800,
@@ -123,6 +123,12 @@ fingerprinted by the run's worker profile. Prefer a first/only stage for an
 ordinary task; add stages only when the acceptance checks are genuinely
 independent.
 
+**Checks run from the frozen snapshot.** Diriger copies the `checks` path into
+`<evidence>/stages/<id>/inputs/verifier/` and runs the entry from there, so a
+check script cannot resolve anything outside that directory relative to its own
+location. Anchor external tooling to `$SAMOVAR_BENCH_REPO` instead — for example
+`$(dirname "$SAMOVAR_BENCH_REPO")/tooling/...` — never to `$(dirname "$0")`.
+
 `retries` controls how a failed attempt may be repeated. `hard` retries are
 unconditional and never consult the evaluator; `soft` retries require the
 evaluator's verdict; each `extend` verdict adds a fraction of the stage's base
@@ -133,6 +139,11 @@ or a tool-call limit — goes straight to the evaluator instead of repeating at 
 same budget, and an extension is granted only when the attempt left real progress
 in the tree. Size `maxToolCalls` for the median attempt and let the policy cover
 the tail; `extend` is not a licence to merge stages.
+
+An evaluator that errors or times out is treated as infrastructure, not a verdict:\nthe policy falls back to an unconditional retry while one remains, and only stops
+for review when none does. A retry that leaves the candidate unchanged because a
+previous attempt already committed it is re-verified rather than failed for lack
+of a new commit.
 
 The worker and evaluator commands are frozen as part of the manifest; see
 [OMP configuration](omp.md) for the pinned OMP argv and the local evaluator.

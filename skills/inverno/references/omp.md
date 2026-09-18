@@ -84,9 +84,9 @@ persistence and early-fact retention through real compaction passed.
 The manifest may also carry an optional `evaluator` object for the **between-attempt**
 Qwen assessment. It runs after failed worker/verifier cleanup, before spending a
 remaining attempt; never alongside the worker. The local adapter command goes in
-`evaluator.command` (with optional `evaluator.timeoutSeconds`, default 120); the
+`evaluator.command` (with optional `evaluator.timeoutSeconds`, default 300); the
 canonical machine copy is
-`/data/work/releases/diriger-config/20260917-manifest/evaluator-command.json`.
+`/data/work/releases/diriger-config/20260918-checks/evaluator-command.json`.
 Its Node runtime is the asdf-installed Node 24 at
 `/home/ivan/.asdf/installs/nodejs/24.18.0/bin/node`; reference that versioned
 binary directly, never the `~/.asdf/shims/node` shim (the shim needs `asdf` on
@@ -96,7 +96,9 @@ Omitting
 `evaluator` disables the gate for that run. It receives bounded tool/Git/verifier
 evidence, no worker reasoning transcript, and has no model tools. A supported new
 approach is required to retry. Missing/repeated hypothesis, malformed output,
-evaluator failure, or infrastructure verdict stops for review. Reports/Git/verifier
+evaluator failure, or infrastructure verdict stops for review. An evaluator error
+or timeout instead falls back to an unconditional retry while one remains.
+Reports/Git/verifier
 still decide acceptance. Do not treat an evaluator's proposal as authorization to
 restart a terminal/exhausted run.
 
