@@ -182,7 +182,8 @@ async function assertFile(path: string, label: string): Promise<void> {
 
 export async function validateConfig(config: SupervisorConfig): Promise<void> {
   await assertFile(config.planPath, "plan");
-  await assertFile(config.verifierPath, "verifier");
+  if (config.verifierPath !== undefined)
+    await assertFile(config.verifierPath, "verifier");
   await assertFile(config.promptPath, "worker prompt");
 
   if (!isAbsolute(config.repositoryPath)) {
@@ -701,6 +702,10 @@ export async function resumeSupervision(
         throw new Error("resume verifier lacks candidate HEAD");
       const attempt = current.reservedAttempts;
       await checkpoint(evidencePath, { phase: "verifying", candidateHead });
+      if (current.inputs.verifier === undefined)
+        throw new Error(
+          "resume verifier replay requires a declared verifier",
+        );
       const command = [...current.inputs.verifier.argv];
       const startedAt = now();
       const verification = await runVerification(
@@ -930,18 +935,22 @@ async function superviseOwned(
       ...(newProfile === undefined
         ? {}
         : { profile: newProfile as unknown as Json }),
-      verifier: {
-        argv: [config.verifierPath, config.stage],
-        cwd: config.repositoryPath,
-        entryPath: config.verifierPath,
-        selfContained: config.verifierSelfContained ?? true,
-        ...(config.verifierDependencies === undefined
-          ? {}
-          : { dependencies: config.verifierDependencies }),
-        ...(config.verifierSnapshotRoot === undefined
-          ? {}
-          : { snapshotRoot: config.verifierSnapshotRoot }),
-      },
+      ...(config.verifierPath === undefined
+        ? {}
+        : {
+            verifier: {
+              argv: [config.verifierPath, config.stage],
+              cwd: config.repositoryPath,
+              entryPath: config.verifierPath,
+              selfContained: config.verifierSelfContained ?? true,
+              ...(config.verifierDependencies === undefined
+                ? {}
+                : { dependencies: config.verifierDependencies }),
+              ...(config.verifierSnapshotRoot === undefined
+                ? {}
+                : { snapshotRoot: config.verifierSnapshotRoot }),
+            },
+          }),
     }));
 
   const startedAt = frozen.startedAt;
@@ -1227,7 +1236,13 @@ async function superviseOwned(
     let verification: VerificationResult | undefined;
     let verifierIntegrityFailure = false;
     let failureReason = problem ?? workerReportFailure;
-    if (failureReason === undefined && !decisionBlocked) {
+    // A stage that declares no checks is accepted on a clean descendant commit
+    // plus the worker report; the reviewer judges the result.
+    if (
+      failureReason === undefined &&
+      !decisionBlocked &&
+      frozen.inputs.verifier !== undefined
+    ) {
       console.log(
         `[stage ${config.stage} attempt ${attempt}] verification.started`,
       );

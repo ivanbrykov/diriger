@@ -328,6 +328,15 @@ async function parseManifestValue(
       `stages[${index}]`,
     );
     let stage: ManifestStage;
+    const planPath = pathOf(entry.plan, `stages[${index}].plan`);
+    const commonality = {
+      id: entry.id,
+      planPath,
+      ...(after === undefined ? {} : { after }),
+      ...(Object.keys(stageBudgets).length === 0
+        ? {}
+        : { budgets: stageBudgets }),
+    };
     if (entry.checks !== undefined) {
       if (entry.verifier !== undefined || entry.verifierManifest !== undefined)
         throw new ChainError(
@@ -340,22 +349,16 @@ async function parseManifestValue(
         strict,
       );
       stage = {
-        id: entry.id,
-        planPath: pathOf(entry.plan, `stages[${index}].plan`),
+        ...commonality,
         verifierPath: resolved.entryPath,
         verifierFiles: resolved.files,
         ...(resolved.closure === undefined
           ? {}
           : { verifier: resolved.closure }),
-        ...(after === undefined ? {} : { after }),
-        ...(Object.keys(stageBudgets).length === 0
-          ? {}
-          : { budgets: stageBudgets }),
       };
-    } else {
+    } else if (entry.verifier !== undefined) {
       stage = {
-        id: entry.id,
-        planPath: pathOf(entry.plan, `stages[${index}].plan`),
+        ...commonality,
         verifierPath: pathOf(entry.verifier, `stages[${index}].verifier`),
         ...(entry.verifierManifest === undefined
           ? {}
@@ -365,11 +368,15 @@ async function parseManifestValue(
                 `stages[${index}].verifierManifest`,
               ),
             }),
-        ...(after === undefined ? {} : { after }),
-        ...(Object.keys(stageBudgets).length === 0
-          ? {}
-          : { budgets: stageBudgets }),
       };
+    } else {
+      // No checks declared: the stage is accepted on a clean commit plus the
+      // worker report, and the reviewer judges the result.
+      if (entry.verifierManifest !== undefined)
+        throw new ChainError(
+          `stages[${index}].verifierManifest requires verifier`,
+        );
+      stage = { ...commonality };
     }
     stages.push(stage);
   }
@@ -419,7 +426,9 @@ export async function parseRunManifest(path: string): Promise<RunManifest> {
   for (const stage of manifest.stages) {
     for (const [label, file] of [
       ["plan", stage.planPath],
-      ["verifier", stage.verifierPath],
+      ...(stage.verifierPath === undefined
+        ? []
+        : [["verifier", stage.verifierPath] as const]),
       ...(stage.verifierManifestPath === undefined
         ? []
         : [["verifierManifest", stage.verifierManifestPath] as const]),
@@ -634,7 +643,8 @@ export async function createFrozenChain(
   const files: FrozenChainFile[] = [];
   for (const stage of manifest.stages) {
     files.push(await freezeFile(manifestDir, stage.planPath, "plan", stage.id));
-    for (const file of stage.verifierFiles ?? [stage.verifierPath])
+    for (const file of stage.verifierFiles ??
+      (stage.verifierPath === undefined ? [] : [stage.verifierPath]))
       files.push(await freezeFile(manifestDir, file, "verifier", stage.id));
     if (stage.verifierManifestPath !== undefined)
       files.push(
@@ -796,7 +806,9 @@ async function stageConfig(
     repositoryPath: manifest.repositoryPath,
     planPath: stage.planPath,
     stage: stage.id,
-    verifierPath: stage.verifierPath,
+    ...(stage.verifierPath === undefined
+      ? {}
+      : { verifierPath: stage.verifierPath }),
     promptPath: manifest.promptPath,
     evidencePath,
     acpCommand: manifest.workerCommand,

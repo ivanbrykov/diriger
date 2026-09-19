@@ -355,12 +355,12 @@ sh('git', 'merge', '--no-ff', 'side', '-m', 'merge')
   test("uses frozen verifier snapshot after original verifier changes", async () => {
     const { config } = await fixture();
     await supervise(config);
-    await writeFile(config.verifierPath, "#!/usr/bin/env bash\nexit 99\n");
-    await chmod(config.verifierPath, 0o755);
+    await writeFile(config.verifierPath!, "#!/usr/bin/env bash\nexit 99\n");
+    await chmod(config.verifierPath!, 0o755);
     const state = await readState(config.evidencePath);
     expect(
       await readFile(
-        join(config.evidencePath, state.inputs.verifier.entry.path),
+        join(config.evidencePath, state.inputs.verifier!.entry.path),
         "utf8",
       ),
     ).not.toContain("exit 99");
@@ -502,10 +502,10 @@ test("a retry that leaves the candidate unchanged re-verifies it", async () => {
   // Fails the first time, passes afterwards: models a check that was broken
   // rather than a candidate that was wrong.
   await writeFile(
-    config.verifierPath,
+    config.verifierPath!,
     `#!/usr/bin/env bash\nset -euo pipefail\nn=$(cat ${counter} 2>/dev/null || echo 0)\necho $((n+1)) > ${counter}\nif [[ "$n" == "0" ]]; then echo "flaky check"; exit 1; fi\ntest "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = correct\n`,
   );
-  await chmod(config.verifierPath, 0o755);
+  await chmod(config.verifierPath!, 0o755);
   await writeAgent(agent, `import subprocess, pathlib
 marker = pathlib.Path(repo) / 'attempted'
 if not marker.exists():
@@ -520,6 +520,16 @@ if not marker.exists():
   expect(result.attempts[1]?.preHead).toBe(result.attempts[1]?.postHead);
   expect(result.attempts[1]?.verification?.exitCode).toBe(0);
 }, 30_000);
+
+test("a stage with no declared checks is accepted on a clean commit", async () => {
+  const { config } = await fixture();
+  const { verifierPath: _declared, ...unchecked } = config;
+  const result = await supervise(unchecked);
+  expect(result.status).toBe("accepted");
+  // No verification ran, and the evidence says so rather than implying a pass.
+  expect(result.attempts[0]?.verification).toBeUndefined();
+  expect((await readState(config.evidencePath)).phase).toBe("accepted");
+}, 20_000);
 
 test("boundary gate rejects a repeated hypothesis before spending a third attempt", async () => {
   const { config, agent } = await fixture();

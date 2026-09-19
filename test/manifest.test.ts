@@ -380,6 +380,38 @@ describe("parseRunManifest", () => {
     }
   });
 
+  test("a stage may declare no checks at all", async () => {
+    const { dir, manifest } = await writeManifest({
+      ...base,
+      version: 3,
+      stages: [{ id: "s1", plan: "plan.md" }],
+    });
+    try {
+      const stage = (await parseRunManifest(manifest)).stages[0]!;
+      expect(stage.verifierPath).toBeUndefined();
+      expect(stage.verifierFiles).toBeUndefined();
+      expect(stage.verifier).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects verifierManifest without a verifier", async () => {
+    const { dir, manifest } = await writeManifest({
+      ...base,
+      stages: [
+        { id: "s1", plan: "plan.md", verifierManifest: "verify.json" },
+      ],
+    });
+    try {
+      await expect(parseRunManifest(manifest)).rejects.toThrow(
+        "verifierManifest requires verifier",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("rejects retries combined with maxAttempts and unknown retry keys", async () => {
     const conflict = await writeManifest({
       ...base,

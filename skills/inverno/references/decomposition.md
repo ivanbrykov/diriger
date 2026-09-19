@@ -89,9 +89,11 @@ Ordered implementation steps:
 (Replace these generic descriptions with task-specific actions and checkpoints.)
 
 Acceptance and return:
-- Definition of done: the observable behaviors that must hold, written into the
-  plan. Exact commands plus expected behavior, including negative/concurrency cases
-  where relevant; the checks file or directory that executes them.
+- Definition of done: the observable behaviours that must hold, written in the
+  plan in plain English, including negative/concurrency cases where relevant and
+  the checks the worker should run (project lint, typecheck, tests, build).
+  Declare `checks` in the manifest only if you want a deterministic gate;
+  otherwise acceptance is a clean commit plus the report, judged in review.
 - Required evidence, structured report and clean descendant-commit requirements.
 - Explicitly excluded future work and known validation limits.
 
@@ -108,13 +110,14 @@ in the actual handoff; references to a skill the worker cannot read are insuffic
 
 Use verified absolute remote paths for supporting material. Stage and identify
 all required inputs, including prior probes and framework source availability.
-Distinguish missing dependencies from failed code. Preflight the checks and their
-fixtures before spending model time: a failure caused by bad paths, unsupported
-runner configuration or broken oracle setup must not be scored as worker failure.
-Diriger freezes and hashes everything under the stage's `checks` path, so place
-helpers beside the entry rather than declaring them separately. Checks execute
-from that frozen snapshot: anchor external tooling to `$SAMOVAR_BENCH_REPO`
-(or the task directory above it), never to the script's own location.
+Distinguish missing dependencies from failed code. When a stage declares
+`checks`, preflight them and their fixtures before spending model time: a failure
+caused by bad paths, unsupported runner configuration or broken oracle setup must
+not be scored as worker failure. Diriger freezes and hashes everything under the
+`checks` path, so place helpers beside the entry rather than declaring them
+separately, and anchor external tooling to `$SAMOVAR_BENCH_REPO` rather than the
+script's own location. Most stages declare no checks at all: the definition of
+done is the contract, and the reviewer judges the result.
 
 ## Budget sizing and cushion
 
@@ -154,13 +157,15 @@ whole transcripts or making each stage rediscover the same libraries.
 ### Chain handoff: submit the whole stage chain in one manifest
 
 Per-stage caller review is the default because it catches drift early. When every
-stage's acceptance is fully encoded in its checks and its definition of done, that
-review adds little: the
+stage's acceptance is fully written down as an observable definition of done — and
+every stage that declares `checks` has a strong one — review adds little mid-chain:
+the
 machinery can gate progression instead. You may prepare and submit the entire
 dependency-ordered chain in one handoff when ALL of the following hold:
 
-- Every stage has a strong independent check run that covers its acceptance
-  criteria; "caller would want to look at the diff first" is not encoded anywhere.
+- Every stage's definition of done is expressed as observable behaviours, with a
+  strong independent check run wherever a stage declares `checks`;
+  "caller would want to look at the diff first" is not encoded anywhere.
 - Each stage brief is self-sufficient: it does not depend on how an earlier
   worker happened to implement its stage, or it says exactly what to read from
   the predecessor's report and commit.

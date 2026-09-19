@@ -4,7 +4,12 @@ export interface SupervisorConfig {
   readonly repositoryPath: string;
   readonly planPath: string;
   readonly stage: string;
-  readonly verifierPath: string;
+  /**
+   * Acceptance checks. Absent means no automated verification: the stage is
+   * accepted on a clean descendant commit plus the worker report, and the
+   * reviewer judges the result. The definition of done lives in the plan.
+   */
+  readonly verifierPath?: string;
   /** Legacy verifier defaults to self-contained. Declare closure for helpers/oracles. */
   readonly verifierSelfContained?: boolean;
   readonly verifierDependencies?: ReadonlyArray<string>;
@@ -53,9 +58,9 @@ export interface ManifestStage {
   readonly id: string;
   /**
    * Entry executable: the v3 `checks` entry point, or the legacy v2 verifier.
-   * Always an absolute path.
+   * Absent means the stage declares no automated checks.
    */
-  readonly verifierPath: string;
+  readonly verifierPath?: string;
   /** Legacy v2 verifier closure manifest, when one was declared. */
   readonly verifierManifestPath?: string;
   /**

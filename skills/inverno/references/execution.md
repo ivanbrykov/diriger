@@ -53,15 +53,25 @@ brief and independent checks. Review its exact result before starting dependent
 stages; ordinary whole-task authorization does not require asking again for each
 stage. This workflow is caller-driven; Diriger does not schedule the stage graph.
 
-Prepare a clean dedicated Git tree, a clear plan, and an executable independent
-check run outside the tree. Diriger requires a new descendant commit on the same
-branch and a clean tree. The checks must leave the exact HEAD/ref and tree
-unchanged. They receive `SAMOVAR_BENCH_REPO` and the stage as their first two
-arguments. Point the stage's `checks` at the check file or directory; Diriger
-freezes and hashes everything under that path, so there is no dependency manifest
-to declare and no `verifierManifest`. Write the stage's definition of done into
-the plan — the worker reads it while working and the reviewer reads it when
-judging the result.
+Prepare a clean dedicated Git tree and a clear plan whose **definition of done** is
+written in plain English: goal, constraints, observable behaviours to preserve
+and achieve, and the checks the worker should run. Diriger requires a new
+descendant commit on the same branch and a clean tree. The definition of done
+lives in the plan — the worker reads it while working and the reviewer reads it
+when judging the result.
+
+**Acceptance is commit plus report.** By default Diriger verifies nothing about
+the result: a stage is accepted when it leaves a clean descendant commit and a
+complete worker report, and the reviewer judges whether the behaviour is right.
+A single stage is therefore not evidence of correctness — the review is. Omit
+`checks` unless you want a deterministic gate, and treat the report's validation
+claims as unverified prose: re-run what matters during review.
+
+`checks` is optional. When declared, it is a path to a check file or directory
+(Diriger freezes and hashes everything under it — there is no dependency manifest
+and no `verifierManifest`), it runs from the frozen snapshot, and its exit status
+gates the stage. Prefer the project's own verification, and let the definition of
+done, not a bespoke probe suite, carry the behavioural expectations.
 
 Diriger is configured entirely by one version-2 JSON manifest; there are no run
 flags. It lists the repository, a fresh evidence directory, the worker command,
@@ -101,10 +111,13 @@ placeholders — see the warning below):
     "maxToolRepetitions": 8
   },
   "stages": [
-    { "id": "s1", "plan": "stages/s1.md", "checks": "verification/" }
+    { "id": "s1", "plan": "stages/s1.md" }
   ]
 }
 ```
+
+Add `"checks": "verification/"` to a stage only when you want an automated gate;
+with no `checks` the stage is accepted on the clean commit plus the report.
 
 **Do not run a bare `omp acp`.** The launcher no longer injects a worker, and a
 bare OMP argv omits the owned system prompt and extension, silently reverting to
@@ -123,11 +136,12 @@ fingerprinted by the run's worker profile. Prefer a first/only stage for an
 ordinary task; add stages only when the acceptance checks are genuinely
 independent.
 
-**Checks run from the frozen snapshot.** Diriger copies the `checks` path into
-`<evidence>/stages/<id>/inputs/verifier/` and runs the entry from there, so a
-check script cannot resolve anything outside that directory relative to its own
-location. Anchor external tooling to `$SAMOVAR_BENCH_REPO` instead — for example
-`$(dirname "$SAMOVAR_BENCH_REPO")/tooling/...` — never to `$(dirname "$0")`.
+**Checks, when declared, run from the frozen snapshot.** Diriger copies the
+`checks` path into `<evidence>/stages/<id>/inputs/verifier/` and runs the entry
+from there, so a check script cannot resolve anything outside that directory
+relative to its own location. Anchor external tooling to `$SAMOVAR_BENCH_REPO`
+instead — for example `$(dirname "$SAMOVAR_BENCH_REPO")/tooling/...` — never to
+`$(dirname "$0")`.
 
 `retries` controls how a failed attempt may be repeated. `hard` retries are
 unconditional and never consult the evaluator; `soft` retries require the
