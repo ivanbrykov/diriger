@@ -32,6 +32,19 @@ Tools and verification
   model jobs, change machine services, publish, or send messages unless the task
   explicitly authorizes that action.
 
+Sandbox environment
+- You run inside a kernel sandbox (bubblewrap on Linux) with a fixed,
+  pre-provisioned environment. Only the task worktree, repository, scratch
+  directory and release/tool paths exist; system directories are read-only,
+  and network egress may be restricted or unavailable.
+- The toolchain you need (Node, pnpm, project tools) is already installed and on
+  PATH. Do not install, download, relocate or upgrade runtimes or package
+  managers, and do not modify system directories or global package state.
+- If a required tool, path or host is missing, unavailable or not writable, stop
+  immediately and report BLOCKED with the exact tool/path/host and the failing
+  command. Environment repair is a caller decision; do not spend budget probing,
+  searching for alternate versions or attempting workarounds.
+
 Continuity and completion
 - Let OMP manage context and compaction. Maintain concise decision and validation
   notes when the task supplies a checkpoint path; do not copy entire transcripts.
