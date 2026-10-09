@@ -38,6 +38,10 @@ export interface AttemptProtocol {
   cleanupComplete: boolean;
   /** ACP tool-call session updates observed before the attempt ended. */
   toolCalls?: number;
+  /** Present when the tool-call cushion granted one finalize turn. */
+  cushionUsed?: true;
+  /** Tool calls observed after the main tool-call budget was exhausted. */
+  finalizeToolCalls?: number;
   /** Present only when the ACP tool-free generation watchdog fired. */
   watchdog?: {
     readonly toolProgressAgeMs: number;
@@ -131,6 +135,25 @@ function textBytes(update: Record<string, unknown>): number {
   return new TextEncoder().encode(content.text).byteLength;
 }
 
+function terminationForStopReason(
+  stopReason: string,
+): TerminationReason | undefined {
+  return stopReason === "max_tokens" ? "generation-limit" : undefined;
+}
+
+// Operational notice, not a prompt template: plumbing another prompt path
+// through config/state/profile freezing is not warranted for it.
+function finalizeInstruction(remaining: number): string {
+  return (
+    "The tool-call budget for this attempt is exhausted. Stop investigating " +
+    "and stop making changes beyond finalizing. Using at most " +
+    remaining +
+    " more tool calls, only run the checks needed to confirm your current " +
+    "work, create the required commit, write the required worker report at " +
+    "the path already given in your original brief, and then stop."
+  );
+}
+
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -197,6 +220,9 @@ export class AcpAttemptExecutor implements AttemptExecutor {
     let toolCalls = 0,
       toolRepetitions = 0,
       lastToolCall: string | undefined;
+    let cushionActive = false,
+      cushionUsed = false,
+      finalizeToolCalls = 0;
     let watchdogSnapshot: AttemptProtocol["watchdog"] | undefined;
     const lifecycle = async (state: AttemptLifecycle) => {
       await onLifecycle?.(state);
@@ -333,12 +359,39 @@ export class AcpAttemptExecutor implements AttemptExecutor {
               toolRepetitions =
                 identity === lastToolCall ? toolRepetitions + 1 : 1;
               lastToolCall = identity;
-              if (toolCalls > config.maxToolCalls) {
-                fail(
-                  "ACP tool-call budget exceeded",
-                  "tool-call-limit",
-                );
-                void cleanup("tool-call-limit").catch(() => {});
+              if (cushionActive) {
+                finalizeToolCalls += 1;
+                if (finalizeToolCalls > config.toolCallCushion) {
+                  fail(
+                    "ACP finalize tool-call cushion exceeded",
+                    "tool-call-limit",
+                  );
+                  void cleanup("tool-call-limit").catch(() => {});
+                } else if (toolRepetitions > config.maxToolRepetitions) {
+                  fail(
+                    "ACP repeated an identical tool call beyond its budget",
+                    "tool-call-limit",
+                  );
+                  void cleanup("tool-call-limit").catch(() => {});
+                }
+              } else if (toolCalls > config.maxToolCalls) {
+                if (config.toolCallCushion > 0) {
+                  // Once per attempt: cancel the in-flight turn and grant one
+                  // finalize turn instead of killing a finished-line worker.
+                  cushionActive = true;
+                  finalizeToolCalls += 1;
+                  send({
+                    jsonrpc: "2.0",
+                    method: "session/cancel",
+                    params: { sessionId },
+                  });
+                } else {
+                  fail(
+                    "ACP tool-call budget exceeded",
+                    "tool-call-limit",
+                  );
+                  void cleanup("tool-call-limit").catch(() => {});
+                }
               } else if (toolRepetitions > config.maxToolRepetitions) {
                 fail(
                   "ACP repeated an identical tool call beyond its budget",
@@ -484,6 +537,8 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         attempt: String(attempt),
         failure_report_path: failureReportPath,
         worker_report_path: input.workerReportPath ?? "",
+        previous_stage_commit: config.previousStageCommit ?? "",
+        previous_stage_report_path: config.previousStageReportPath ?? "",
         worker_judgment:
           input.workerReportPath === undefined
             ? ""
@@ -505,9 +560,32 @@ export class AcpAttemptExecutor implements AttemptExecutor {
       if (!object(prompt) || typeof prompt.stopReason !== "string")
         throw new Error("ACP session/prompt did not return stopReason");
       stopReason = prompt.stopReason;
+      if (cushionActive && reason === undefined && stopReason === "cancelled") {
+        // The budget-exhaustion cancel resolved the turn as expected; grant
+        // the single finalize turn within the remaining cushion. An end_turn
+        // that raced the cancel instead skips the cushion entirely.
+        cushionUsed = true;
+        const finalize = await call("session/prompt", {
+          sessionId,
+          prompt: [
+            {
+              type: "text",
+              text: finalizeInstruction(
+                config.toolCallCushion - finalizeToolCalls,
+              ),
+            },
+          ],
+        });
+        if (!object(finalize) || typeof finalize.stopReason !== "string")
+          throw new Error("ACP session/prompt did not return stopReason");
+        stopReason = finalize.stopReason;
+      }
       promptInFlight = false;
       await lifecycle("prompt_finished");
-      if (stopReason !== "end_turn")
+      const termination = terminationForStopReason(stopReason);
+      if (termination !== undefined)
+        fail("ACP prompt stopped: " + stopReason, termination);
+      else if (stopReason !== "end_turn")
         throw new Error("ACP prompt stopped: " + stopReason);
     } catch (error) {
       fail(
@@ -560,6 +638,7 @@ export class AcpAttemptExecutor implements AttemptExecutor {
         ...(wrapperExitCode === undefined ? {} : { wrapperExitCode }),
         cleanupComplete,
         ...(toolCalls === 0 ? {} : { toolCalls }),
+        ...(cushionUsed ? { cushionUsed: true as const, finalizeToolCalls } : {}),
         ...(protocolVersion === undefined ? {} : { protocolVersion }),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(stopReason === undefined ? {} : { stopReason }),

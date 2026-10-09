@@ -1,0 +1,23 @@
+providers:
+  inverno-local:
+    baseUrl: http://127.0.0.1:8080/v1
+    apiKey: local
+    authHeader: true
+    api: openai-completions
+    models:
+      - id: qwen3.8-27b
+        name: Qwen 3.8 27B (inverno local)
+        api: openai-completions
+        reasoning: true
+        input: [text]
+        supportsTools: true
+        tokenizer: qwen3
+        contextWindow: 163840
+        maxTokens: 32768
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        compat:
+          supportsStore: false
+          supportsDeveloperRole: false
+          supportsReasoningEffort: false
+          maxTokensField: max_tokens
+          thinkingFormat: qwen

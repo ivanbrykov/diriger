@@ -1,0 +1,5 @@
+interface:
+  display_name: "Inverno"
+  short_description: "Explicitly offload bounded work to inverno"
+policy:
+  allow_implicit_invocation: false

@@ -1,121 +1,111 @@
 #!/usr/bin/env bun
 
-import { access, readFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { ResumeBlockedError, supervise } from "./supervisor.js";
+import { resolve } from "node:path";
+import {
+  hasChainState,
+  parseRunManifest,
+  readChainState,
+  resumeManifest,
+  runManifest,
+} from "./chain.js";
 import { inspectRun, recoverRun } from "./recovery.js";
 import { reconcileRun } from "./reconciliation.js";
-import type { SupervisorConfig } from "./types.js";
+import { ResumeBlockedError, resumeSupervision } from "./supervisor.js";
 
 const USAGE = [
   "Usage:",
-  "  diriger run --repo PATH --plan PATH --stage ID --verifier PATH --evidence PATH --acp-command JSON_ARGV",
-  "  diriger status --evidence PATH [--json]",
-  "  diriger recover --evidence PATH [--apply] [--json]",
-  "  diriger resume --evidence PATH [--json]",
+  "  diriger run <manifest.json>",
+  "  diriger status <evidence-directory> [--json]",
+  "  diriger recover <evidence-directory> [--apply] [--json]",
+  "  diriger resume <evidence-directory> [--json]",
+  "",
+  "The version-2 manifest is the only run configuration: repository, evidence,",
+  "worker command, evaluator, budgets, and one or more sequential stages.",
+  "A single-stage run is the one-stage case of the same document.",
   "",
   "Status exits: 0 ready/accepted/preview; 1 terminal; 2 invalid input/state; 3 ownership unsafe; 4 task blocked",
-  "",
-  "Options:",
-  "  --acp-command JSON_ARGV         ACP stdio argv as a nonempty JSON array (required)",
-  "  --prompt PATH                   Worker prompt template (default: bundled prompts/worker.md)",
-  "  --worker-report required|optional  Structured worker outcome requirement (default: required)",
-  "  --max-attempts N                Fresh worker attempts (default: 2)",
-  "  --worker-timeout-seconds N      Per-worker wall timeout (default: 1800)",
-  "  --no-tool-timeout-seconds N     Tool-free time gate for generation budget (default: 90)",
-  "  --no-tool-output-bytes N        ACP text bytes since tool (default: 262144)",
-  "  --max-tool-calls N              ACP tool-call budget per attempt (default: 100)",
-  "  --max-tool-repetitions N        Consecutive identical tool-call budget (default: 8)",
-  "  --run-id ID                     Evidence/session prefix (default: timestamp)",
-  "  --verifier-manifest PATH        JSON verifier dependency closure",
 ].join("\n");
 
-function readFlags(
+interface CommandArgs {
+  readonly path: string;
+  readonly flags: ReadonlySet<string>;
+}
+
+/** One positional path plus optional boolean modifiers; no config flags. */
+function readCommandArgs(
   args: ReadonlyArray<string>,
-  booleanFlags: ReadonlySet<string> = new Set(),
-): Map<string, string> {
-  const values = new Map<string, string>();
-  for (let index = 0; index < args.length; ) {
-    const key = args[index];
-    if (key === undefined || !key.startsWith("--"))
-      throw new Error("invalid arguments\n\n" + USAGE);
-    const name = key.slice(2);
-    if (values.has(name)) throw new Error(`duplicate --${name}`);
-    if (booleanFlags.has(name)) {
-      values.set(name, "true");
-      index += 1;
-      continue;
+  booleans: ReadonlySet<string>,
+): CommandArgs {
+  const flags = new Set<string>();
+  const positionals: string[] = [];
+  for (const arg of args) {
+    if (arg.startsWith("--")) {
+      const name = arg.slice(2);
+      if (!booleans.has(name)) throw new Error(`unknown --${name}\n\n${USAGE}`);
+      flags.add(name);
+    } else {
+      positionals.push(arg);
     }
-    const value = args[index + 1];
-    if (value === undefined || value.startsWith("--"))
-      throw new Error("invalid arguments\n\n" + USAGE);
-    values.set(name, value);
-    index += 2;
   }
-  return values;
+  if (positionals.length !== 1)
+    throw new Error("expected exactly one path\n\n" + USAGE);
+  return { path: resolve(positionals[0]!), flags };
 }
 
-function required(values: Map<string, string>, key: string): string {
-  const value = values.get(key);
-  if (value === undefined || value.trim() === "") {
-    throw new Error("missing --" + key + "\n\n" + USAGE);
-  }
-  return value;
+function chainExitCode(outcome: "running" | "accepted" | "failed" | "task-blocked"): number {
+  return outcome === "accepted"
+    ? 0
+    : outcome === "task-blocked"
+      ? 4
+      : outcome === "failed"
+        ? 1
+        : 0;
 }
 
-function positiveInteger(
-  values: Map<string, string>,
-  key: string,
-  fallback: number,
-): number {
-  const raw = values.get(key);
-  if (raw === undefined) return fallback;
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error("--" + key + " must be a positive integer");
-  }
-  return value;
-}
-
-function defaultPromptPath(): string {
-  return resolve(import.meta.dir, "..", "prompts", "worker.md");
-}
-
-function parseAcpCommand(raw: string): ReadonlyArray<string> {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error(
-      "--acp-command must be a JSON array of nonempty argv strings",
-    );
-  }
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.some((entry) => typeof entry !== "string" || entry.trim() === "")
-  ) {
-    throw new Error(
-      "--acp-command must be a JSON array of nonempty argv strings",
-    );
-  }
-  return value;
+/** Chain-level view: the manifest-driven run with per-stage state. */
+async function chainStatus(
+  evidencePath: string,
+): Promise<{ body: unknown; code: number }> {
+  const state = await readChainState(evidencePath);
+  return {
+    body: {
+      status:
+        state.outcome === "running"
+          ? "ready"
+          : state.outcome === "accepted"
+            ? "accepted"
+            : state.outcome === "failed"
+              ? "failed"
+              : "task-blocked",
+      chainId: state.chainId,
+      outcome: state.outcome,
+      stages: state.stages,
+      updatedAt: state.updatedAt,
+    },
+    code: chainExitCode(state.outcome),
+  };
 }
 
 async function durableStatus(
   command: "status" | "recover",
   args: ReadonlyArray<string>,
 ): Promise<{ body: unknown; code: number }> {
-  const values = readFlags(args, new Set(["json", "apply"]));
-  const evidence = resolve(required(values, "evidence"));
-  for (const key of values.keys())
-    if (!["evidence", "json", "apply"].includes(key))
-      throw new Error(`unknown --${key}`);
-  if (command === "status" && values.has("apply"))
+  const { path: evidence, flags } = readCommandArgs(
+    args,
+    new Set(["json", "apply"]),
+  );
+  if (command === "status" && flags.has("apply"))
     throw new Error("--apply requires recover");
+  if (await hasChainState(evidence)) {
+    if (command === "recover" && flags.has("apply"))
+      throw new Error(
+        "recover --apply targets a stage evidence directory; a chain continues through resume",
+      );
+    return await chainStatus(evidence);
+  }
   const inspection =
     command === "recover"
-      ? await recoverRun({ evidencePath: evidence, apply: values.has("apply") })
+      ? await recoverRun({ evidencePath: evidence, apply: flags.has("apply") })
       : await inspectRun(evidence);
   if (!inspection.state) {
     if (inspection.legacySummary !== undefined)
@@ -153,10 +143,10 @@ async function durableStatus(
               inspection.state.phase === "task_blocked")
           ? "task-blocked"
           : decision.action === "terminal"
-          ? "failed"
-          : decision.action === "reuse-accepted"
-            ? "accepted"
-            : "ready";
+            ? "failed"
+            : decision.action === "reuse-accepted"
+              ? "accepted"
+              : "ready";
   return {
     body: {
       status,
@@ -171,142 +161,67 @@ async function durableStatus(
       status === "task-blocked"
         ? 4
         : status === "active" || status === "blocked"
-        ? 3
-        : status === "failed"
-          ? 1
-          : 0,
+          ? 3
+          : status === "failed"
+            ? 1
+            : 0,
   };
 }
 
-export function parseConfig(args: ReadonlyArray<string>): SupervisorConfig {
-  if (args[0] !== "run") throw new Error(USAGE);
-  const values = readFlags(args.slice(1));
-  const acpCommand = parseAcpCommand(required(values, "acp-command"));
-  const reportMode = values.get("worker-report") ?? "required";
-  if (reportMode !== "required" && reportMode !== "optional")
-    throw new Error("--worker-report must be required or optional");
-  const timestamp = new Date()
-    .toISOString()
-    .replaceAll(/[-:]/g, "")
-    .replace(/\.\d{3}Z$/, "Z");
-  return {
-    repositoryPath: resolve(required(values, "repo")),
-    planPath: resolve(required(values, "plan")),
-    stage: required(values, "stage"),
-    verifierPath: resolve(required(values, "verifier")),
-    promptPath: resolve(values.get("prompt") ?? defaultPromptPath()),
-    evidencePath: resolve(required(values, "evidence")),
-    acpCommand,
-    workerReportRequired: reportMode === "required",
-    maxAttempts: positiveInteger(values, "max-attempts", 2),
-    workerTimeoutMs:
-      positiveInteger(values, "worker-timeout-seconds", 1_800) * 1_000,
-    noToolTimeoutMs:
-      positiveInteger(values, "no-tool-timeout-seconds", 90) * 1_000,
-    noToolOutputBytes: positiveInteger(values, "no-tool-output-bytes", 262_144),
-    maxToolCalls: positiveInteger(values, "max-tool-calls", 100),
-    maxToolRepetitions: positiveInteger(values, "max-tool-repetitions", 8),
-    runId: values.get("run-id") ?? "diriger-" + timestamp,
-  };
+async function runCommand(args: ReadonlyArray<string>): Promise<void> {
+  const { path: manifestPath } = readCommandArgs(args, new Set());
+  const manifest = await parseRunManifest(manifestPath);
+  const state = await runManifest(manifest);
+  process.exitCode = chainExitCode(state.outcome);
 }
 
-export async function loadRunConfig(
-  args: ReadonlyArray<string>,
-): Promise<SupervisorConfig> {
-  const config = parseConfig(args);
-  const values = readFlags(args.slice(1));
-  const manifestPath = values.get("verifier-manifest");
-  if (manifestPath === undefined) return config;
-  let raw: unknown;
-  const absolute = resolve(manifestPath);
-  try {
-    raw = JSON.parse(await readFile(absolute, "utf8"));
-  } catch {
-    throw new Error("--verifier-manifest must be readable JSON");
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw))
-    throw new Error("invalid verifier manifest");
-  const m = raw as {
-    selfContained?: unknown;
-    snapshotRoot?: unknown;
-    dependencies?: unknown;
+async function resumeCommand(args: ReadonlyArray<string>): Promise<void> {
+  const { path: evidence, flags } = readCommandArgs(args, new Set(["json"]));
+  const json = flags.has("json");
+  const print = (value: unknown): void => {
+    console.log(json ? JSON.stringify(value) : JSON.stringify(value, null, 2));
   };
-  if (
-    typeof m.selfContained !== "boolean" ||
-    !Array.isArray(m.dependencies) ||
-    m.dependencies.some((x) => typeof x !== "string" || x.trim() === "")
-  )
-    throw new Error("invalid verifier manifest closure");
-  if (m.selfContained && m.dependencies.length > 0)
-    throw new Error("self-contained verifier cannot declare dependencies");
-  if (m.snapshotRoot !== undefined && typeof m.snapshotRoot !== "string")
-    throw new Error("invalid verifier manifest snapshotRoot");
-  const base = dirname(absolute),
-    path = (x: string) => resolve(base, x);
-  const root = m.snapshotRoot === undefined ? undefined : path(m.snapshotRoot);
-  if (root !== undefined && !isAbsolute(root))
-    throw new Error("invalid verifier manifest snapshotRoot");
-  const dependencies = m.dependencies.map(path);
-  for (const dependency of dependencies) {
-    try {
-      await access(dependency);
-    } catch {
-      throw new Error(
-        `verifier manifest dependency is unreadable: ${dependency}`,
-      );
-    }
+  if (await hasChainState(evidence)) {
+    const state = await resumeManifest(evidence);
+    print(state);
+    process.exitCode = chainExitCode(state.outcome);
+    return;
   }
-  return {
-    ...config,
-    verifierSelfContained: m.selfContained,
-    verifierDependencies: dependencies,
-    ...(root === undefined ? {} : { verifierSnapshotRoot: root }),
-  };
+  const record = await resumeSupervision(evidence);
+  print(record);
+  process.exitCode =
+    record.status === "accepted" ? 0 : record.status === "task-blocked" ? 4 : 1;
 }
 
 async function main(): Promise<void> {
   try {
     const args = Bun.argv.slice(2);
-    if (args[0] === "status" || args[0] === "recover") {
-      const result = await durableStatus(args[0], args.slice(1));
-      const json = args.includes("--json");
+    const command = args[0];
+    if (command === "run") {
+      await runCommand(args.slice(1));
+      return;
+    }
+    if (command === "status" || command === "recover") {
+      const result = await durableStatus(command, args.slice(1));
       console.log(
-        json
+        args.includes("--json")
           ? JSON.stringify(result.body)
           : JSON.stringify(result.body, null, 2),
       );
       process.exitCode = result.code;
       return;
     }
-    if (args[0] === "resume") {
-      const values = readFlags(args.slice(1), new Set(["json"]));
-      for (const key of values.keys())
-        if (!["evidence", "json"].includes(key))
-          throw new Error(`unknown --${key}`);
-      const { resumeSupervision } = await import("./supervisor.js");
-      try {
-        const record = await resumeSupervision(
-          resolve(required(values, "evidence")),
-        );
-        console.log(
-          values.has("json")
-            ? JSON.stringify(record)
-            : JSON.stringify(record, null, 2),
-        );
-        process.exitCode = record.status === "accepted" ? 0 : record.status === "task-blocked" ? 4 : 1;
-      } catch (error) {
-        if (error instanceof ResumeBlockedError) {
-          console.error("Error: " + error.message);
-          process.exitCode = 3;
-          return;
-        }
-        throw error;
-      }
+    if (command === "resume") {
+      await resumeCommand(args.slice(1));
       return;
     }
-    const record = await supervise(await loadRunConfig(args));
-    process.exitCode = record.status === "accepted" ? 0 : record.status === "task-blocked" ? 4 : 1;
+    throw new Error(USAGE);
   } catch (error) {
+    if (error instanceof ResumeBlockedError) {
+      console.error("Error: " + error.message);
+      process.exitCode = 3;
+      return;
+    }
     console.error(
       "Error: " + (error instanceof Error ? error.message : String(error)),
     );

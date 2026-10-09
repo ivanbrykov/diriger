@@ -112,10 +112,10 @@ test("preserves verifier snapshot relative layout", async () => {
         selfContained: false,
       },
     });
-    expect(s.inputs.verifier.entry.path).toBe(
+    expect(s.inputs.verifier!.entry.path).toBe(
       "inputs/verifier/scripts/verify-stage.sh",
     );
-    expect(s.inputs.verifier.dependencies[0]?.path).toBe(
+    expect(s.inputs.verifier!.dependencies[0]?.path).toBe(
       "inputs/verifier/oracle/01-domain.test.ts",
     );
   } finally {
@@ -240,10 +240,10 @@ test("snapshot argv executes ledger-style verifier with relative oracle layout",
         selfContained: false,
       },
     });
-    expect(s.inputs.verifier.argv[1]).toBe(
+    expect(s.inputs.verifier!.argv[1]).toBe(
       join(r, "snap", "inputs", "verifier", "scripts", "verify.ts"),
     );
-    await import(s.inputs.verifier.argv[1]!);
+    await import(s.inputs.verifier!.argv[1]!);
   } finally {
     await rm(r, { recursive: true, force: true });
   }

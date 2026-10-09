@@ -95,7 +95,7 @@ test("status accepted exits zero without worker invocation", async () => {
   try {
     await accepted(x);
     const marker = join(x.d, "worker");
-    const r = cli("status", "--evidence", x.e, "--json");
+    const r = cli("status", x.e, "--json");
     if (r.exitCode !== 0)
       throw new Error(r.stdout.toString() + r.stderr.toString());
     expect(r.stdout.toString()).toContain("accepted");
@@ -109,11 +109,9 @@ test("malformed state exit2 and flags deterministic", async () => {
   const x = await f();
   try {
     await writeFile(join(x.e, "state.json"), "{");
-    expect(cli("status", "--evidence", x.e).exitCode).toBe(2);
-    expect(cli("status", "--json", "--evidence", x.e, "--json").exitCode).toBe(
-      2,
-    );
-    expect(cli("status", "--evidence").exitCode).toBe(2);
+    expect(cli("status", x.e).exitCode).toBe(2);
+    expect(cli("status", "--bogus", x.e).exitCode).toBe(2);
+    expect(cli("status").exitCode).toBe(2);
   } finally {
     await rm(x.e, { recursive: true, force: true });
     await rm(x.d, { recursive: true, force: true });
@@ -124,7 +122,7 @@ test("recover preview is read-only and active owner exits3", async () => {
   try {
     const before = await readFile(join(x.e, "state.json"));
     const lock = await OwnershipLock.acquire(x.d, x.e);
-    const r = cli("recover", "--evidence", x.e, "--json");
+    const r = cli("recover", x.e, "--json");
     if (r.exitCode !== 3)
       throw new Error(r.stdout.toString() + r.stderr.toString());
     expect(await readFile(join(x.e, "state.json"))).toEqual(before);
@@ -134,7 +132,7 @@ test("recover preview is read-only and active owner exits3", async () => {
     await rm(x.d, { recursive: true, force: true });
   }
 });
-import { loadRunConfig } from "../src/cli.js";
+import { loadVerifierManifestClosure } from "../src/chain.js";
 test("verifier manifest resolves closure paths", async () => {
   const x = await f();
   try {
@@ -149,25 +147,10 @@ test("verifier manifest resolves closure paths", async () => {
         dependencies: ["dep"],
       }),
     );
-    const c = await loadRunConfig([
-      "run",
-      "--repo",
-      x.d,
-      "--plan",
-      join(x.d, "p"),
-      "--stage",
-      "s",
-      "--verifier",
-      join(x.d, "v"),
-      "--acp-command",
-      '["agent"]',
-      "--evidence",
-      x.e,
-      "--verifier-manifest",
-      m,
-    ]);
-    expect(c.verifierDependencies).toEqual([dep]);
-    expect(c.verifierSelfContained).toBeFalse();
+    const c = await loadVerifierManifestClosure(m);
+    expect(c.dependencies).toEqual([dep]);
+    expect(c.selfContained).toBeFalse();
+    expect(c.snapshotRoot).toBe(x.d);
   } finally {
     await rm(x.e, { recursive: true, force: true });
     await rm(x.d, { recursive: true, force: true });
@@ -181,25 +164,9 @@ test("bad verifier manifest fails before worker", async () => {
       m,
       JSON.stringify({ selfContained: true, dependencies: ["x"] }),
     );
-    await expect(
-      loadRunConfig([
-        "run",
-        "--repo",
-        x.d,
-        "--plan",
-        join(x.d, "p"),
-        "--stage",
-        "s",
-        "--verifier",
-        join(x.d, "v"),
-        "--acp-command",
-        '["agent"]',
-        "--evidence",
-        x.e,
-        "--verifier-manifest",
-        m,
-      ]),
-    ).rejects.toThrow("self-contained");
+    await expect(loadVerifierManifestClosure(m)).rejects.toThrow(
+      "self-contained",
+    );
   } finally {
     await rm(x.e, { recursive: true, force: true });
     await rm(x.d, { recursive: true, force: true });
@@ -208,9 +175,9 @@ test("bad verifier manifest fails before worker", async () => {
 test("resume malformed args exit2 and active owner refuses takeover", async () => {
   const x = await f();
   try {
-    expect(cli("resume", "--evidence").exitCode).toBe(2);
+    expect(cli("resume").exitCode).toBe(2);
     const lock = await OwnershipLock.acquire(x.d, x.e);
-    expect(cli("resume", "--evidence", x.e, "--json").exitCode).toBe(3);
+    expect(cli("resume", x.e, "--json").exitCode).toBe(3);
     await lock.release();
   } finally {
     await rm(x.e, { recursive: true, force: true });
@@ -222,7 +189,7 @@ test("resume reuses accepted checkpoint without worker", async () => {
   const x = await f();
   try {
     await accepted(x);
-    const r = cli("resume", "--evidence", x.e, "--json");
+    const r = cli("resume", x.e, "--json");
     if (r.exitCode !== 0)
       throw new Error(r.stdout.toString() + r.stderr.toString());
     expect(r.stdout.toString()).toContain("accepted");
@@ -236,7 +203,7 @@ test("resume terminal failure exits1 without worker", async () => {
   const x = await f();
   try {
     await checkpoint(x.e, { phase: "failed" });
-    const r = cli("resume", "--evidence", x.e, "--json");
+    const r = cli("resume", x.e, "--json");
     expect(r.exitCode).toBe(1);
     expect(await Bun.file(join(x.d, "worker")).exists()).toBeFalse();
   } finally {

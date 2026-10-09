@@ -20,7 +20,7 @@ async function fixture() {
   await writeFile(prompt, "{{ plan }}\nRepository: {{ repository_path }}\nStage: {{ stage }}\nAttempt: {{ attempt }}\nFailure report: {{ failure_report_path }}\nReport: {{ worker_report_path }}\n{{ worker_judgment }}\n");
   await writeFile(verifier, "#!/usr/bin/env bash\nset -eu\ntest -f \"$SAMOVAR_BENCH_REPO/result.txt\"\n"); await chmod(verifier, 0o755);
   git(repo, ["init", "-q", "-b", "main"]); git(repo, ["config", "user.name", "Test"]); git(repo, ["config", "user.email", "test@example.invalid"]); git(repo, ["add", "."]); git(repo, ["commit", "-qm", "base"]);
-  const config: SupervisorConfig = { repositoryPath: repo, planPath: plan, stage: "outcome", verifierPath: verifier, promptPath: prompt, evidencePath: evidence, acpCommand: ["python3", agent], workerReportRequired: true, maxAttempts: 2, workerTimeoutMs: 5_000, noToolTimeoutMs: 5_000, noToolOutputBytes: 100_000, maxToolCalls: 100, maxToolRepetitions: 8, runId: "outcome-test" };
+  const config: SupervisorConfig = { repositoryPath: repo, planPath: plan, stage: "outcome", verifierPath: verifier, promptPath: prompt, evidencePath: evidence, acpCommand: ["python3", agent], workerReportRequired: true, maxAttempts: 2, workerTimeoutMs: 5_000, noToolTimeoutMs: 5_000, noToolOutputBytes: 100_000, maxToolCalls: 100, toolCallCushion: 0, maxToolRepetitions: 8, runId: "outcome-test" };
   return { root, repo, evidence, plan, verifier, agent, prompt, marker, config };
 }
 async function acpWorker(path: string, report?: string) {
@@ -65,8 +65,8 @@ test("a blocked worker produces a durable terminal outcome without verifier or r
   await writeFile(f.verifier, `#!/usr/bin/env bash\nset -eu\ntouch ${f.marker}\n`); await chmod(f.verifier, 0o755);
   const record = await supervise(f.config);
   expect(record.status).toBe("task-blocked"); expect(record.attempts).toHaveLength(1); expect(record.attempts[0]?.workerReport?.status).toBe("blocked"); expect(await Bun.file(f.marker).exists()).toBeFalse(); expect((await readState(f.evidence)).phase).toBe("task_blocked"); expect((await resumeSupervision(f.evidence)).status).toBe("task-blocked");
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "resume", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "resume", f.evidence], { cwd: process.cwd() }).exitCode).toBe(4);
 }, 10_000);
 
 test("a complete gap-free report permits normal acceptance", async () => {
@@ -76,11 +76,11 @@ test("a complete gap-free report permits normal acceptance", async () => {
   expect(record.status).toBe("accepted"); expect(record.attempts[0]?.workerReport?.status).toBe("complete"); expect((await readState(f.evidence)).phase).toBe("accepted");
 }, 10_000);
 
-test("complete report known gaps vetoes a green verifier before acceptance", async () => {
+test("complete report known gaps are advisory and do not veto a green verifier", async () => {
   const f = await fixture(); await acpWorker(f.agent, '{"version":1,"status":"complete","summary":"partial","knownGaps":["missing migration"],"decisions":[],"validation":["unit test"]}');
   await writeFile(f.verifier, `#!/usr/bin/env bash\nset -eu\ntouch ${f.marker}\ntest "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = done\n`); await chmod(f.verifier, 0o755);
   const record = await supervise(f.config);
-  expect(record.status).toBe("task-blocked"); expect(await Bun.file(f.marker).exists()).toBeTrue(); expect((await readState(f.evidence)).phase).toBe("task_blocked"); expect(record.attempts[0]?.verification?.exitCode).toBe(0);
+  expect(record.status).toBe("accepted"); expect(record.attempts[0]?.verification?.exitCode).toBe(0); expect(record.attempts[0]?.workerReport?.knownGaps).toEqual(["missing migration"]); expect((await readState(f.evidence)).phase).toBe("accepted");
 }, 10_000);
 
 test("missing required report is never accepted", async () => {
@@ -117,7 +117,7 @@ test("pending veto without durable worker completion cannot trigger a fresh atte
   const { reconcileRun } = await import("../src/reconciliation.js");
   const decision = await reconcileRun(f.evidence, await readState(f.evidence), 2);
   expect(decision.action).toBe("blocked"); expect(decision.reason).toContain("not durably proven");
-  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", "--evidence", f.evidence], { cwd: process.cwd() }).exitCode).toBe(3);
+  expect(Bun.spawnSync([process.execPath, "src/cli.ts", "status", f.evidence], { cwd: process.cwd() }).exitCode).toBe(3);
   await expect(resumeSupervision(f.evidence)).rejects.toThrow();
   expect((await readState(f.evidence)).reservedAttempts).toBe(1);
 });

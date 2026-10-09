@@ -53,6 +53,7 @@ async function fixture(workerReportRequired: boolean) {
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 1_000,
     maxToolCalls: 100,
+    toolCallCushion: 0,
     maxToolRepetitions: 8,
     runId: workerReportRequired ? "blocked-summary" : "accepted-summary",
   };

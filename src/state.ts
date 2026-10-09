@@ -80,7 +80,7 @@ export interface State {
     /** Legacy frozen worker recipe; read-only compatibility for old evidence. */
     readonly recipe?: Fingerprint;
     readonly profile?: Fingerprint;
-    readonly verifier: VerifierManifest;
+    readonly verifier?: VerifierManifest;
     readonly executable?: string;
   };
   readonly reservedAttempts: number;
@@ -233,17 +233,18 @@ function assertState(v: unknown): asserts v is State {
     (v.inputs.recipe !== undefined && !fp(v.inputs.recipe)) ||
     (v.inputs.prompt !== undefined && !fp(v.inputs.prompt)) ||
     (v.inputs.profile !== undefined && !fp(v.inputs.profile)) ||
-    !rec(v.inputs.verifier) ||
-    !fp(v.inputs.verifier.entry) ||
-    !Array.isArray(v.inputs.verifier.dependencies) ||
-    !v.inputs.verifier.dependencies.every(fp) ||
-    typeof v.inputs.verifier.selfContained !== "boolean" ||
-    typeof v.inputs.verifier.cwd !== "string" ||
-    !Array.isArray(v.inputs.verifier.argv) ||
-    v.inputs.verifier.argv.length === 0 ||
-    !v.inputs.verifier.argv.every(
-      (x) => typeof x === "string" && x.length > 0,
-    ) ||
+    (v.inputs.verifier !== undefined &&
+      (!rec(v.inputs.verifier) ||
+        !fp(v.inputs.verifier.entry) ||
+        !Array.isArray(v.inputs.verifier.dependencies) ||
+        !v.inputs.verifier.dependencies.every(fp) ||
+        typeof v.inputs.verifier.selfContained !== "boolean" ||
+        typeof v.inputs.verifier.cwd !== "string" ||
+        !Array.isArray(v.inputs.verifier.argv) ||
+        v.inputs.verifier.argv.length === 0 ||
+        !v.inputs.verifier.argv.every(
+          (x) => typeof x === "string" && x.length > 0,
+        ))) ||
     typeof v.reservedAttempts !== "number" ||
     !Number.isInteger(v.reservedAttempts) ||
     v.reservedAttempts < 0 ||
@@ -310,7 +311,7 @@ export interface CreateOptions {
   resolvedConfig: Json;
   initial: State["initial"];
   planPath: string;
-  verifier: {
+  verifier?: {
     argv: readonly string[];
     cwd: string;
     entryPath: string;
@@ -337,10 +338,12 @@ export async function createFrozenRun(o: CreateOptions): Promise<State> {
       throw new StateError("evidence directory already exists");
     throw error;
   }
-  if (o.verifier.selfContained === undefined)
-    throw new StateError("verifier selfContained declaration is required");
-  if (!o.verifier.selfContained && o.verifier.dependencies === undefined)
-    throw new StateError("external verifier requires explicit dependency list");
+  if (o.verifier !== undefined) {
+    if (o.verifier.selfContained === undefined)
+      throw new StateError("verifier selfContained declaration is required");
+    if (!o.verifier.selfContained && o.verifier.dependencies === undefined)
+      throw new StateError("external verifier requires explicit dependency list");
+  }
   await mkdir(join(o.evidencePath, "inputs"), { mode: 0o700 });
   const configPath = join(o.evidencePath, "inputs", "config.json");
   await atomic(configPath, JSON.stringify(o.resolvedConfig, null, 2) + "\n");
@@ -371,57 +374,68 @@ export async function createFrozenRun(o: CreateOptions): Promise<State> {
               bytes: bytes.byteLength,
             };
           })(),
-    entry = await snap(
-      o.evidencePath,
-      o.verifier.entryPath,
-      verifierSnapshotName(
-        o.verifier.snapshotRoot,
-        o.verifier.entryPath,
-        "verifier-entry",
-      ),
-    ),
-    dependencies = await Promise.all(
-      (o.verifier.dependencies ?? []).map((x, i) =>
-        snap(
-          o.evidencePath,
-          x,
-          verifierSnapshotName(
-            o.verifier.snapshotRoot,
-            x,
-            `verifier-dependency-${i}`,
+    entry =
+      o.verifier === undefined
+        ? undefined
+        : await snap(
+            o.evidencePath,
+            o.verifier.entryPath,
+            verifierSnapshotName(
+              o.verifier.snapshotRoot,
+              o.verifier.entryPath,
+              "verifier-entry",
+            ),
           ),
-        ),
-      ),
-    );
-  const verifier = {
-      argv: o.verifier.argv.map((arg) =>
-        arg === o.verifier.entryPath ||
-        (o.verifier.snapshotRoot !== undefined &&
-          arg === relative(o.verifier.snapshotRoot, o.verifier.entryPath))
-          ? join(o.evidencePath, entry.path)
-          : arg,
-      ),
-      cwd: o.verifier.cwd,
-      entry,
-      dependencies,
-      selfContained: o.verifier.selfContained,
-    },
+    dependencies =
+      o.verifier === undefined
+        ? []
+        : await Promise.all(
+            (o.verifier.dependencies ?? []).map((x, i) =>
+              snap(
+                o.evidencePath,
+                x,
+                verifierSnapshotName(
+                  o.verifier!.snapshotRoot,
+                  x,
+                  `verifier-dependency-${i}`,
+                ),
+              ),
+            ),
+          );
+  const verifier =
+      o.verifier === undefined
+        ? undefined
+        : {
+            argv: o.verifier.argv.map((arg) =>
+              arg === o.verifier!.entryPath ||
+              (o.verifier!.snapshotRoot !== undefined &&
+                arg ===
+                  relative(o.verifier!.snapshotRoot, o.verifier!.entryPath))
+                ? join(o.evidencePath, entry!.path)
+                : arg,
+            ),
+            cwd: o.verifier.cwd,
+            entry: entry!,
+            dependencies,
+            selfContained: o.verifier.selfContained === true,
+          },
     bare = {
       config,
       plan,
       ...(prompt ? { prompt } : {}),
       ...(recipe ? { recipe } : {}),
       ...(profile ? { profile } : {}),
-      verifier,
+      ...(verifier === undefined ? {} : { verifier }),
       ...(o.executable
         ? { executable: await resolveExecutable(o.executable) }
         : {}),
     },
     inputs = { ...bare, fingerprint: hash(canon(bare as unknown as Json)) };
-  await atomic(
-    join(o.evidencePath, "inputs", "verification-manifest.json"),
-    JSON.stringify(verifier, null, 2) + "\n",
-  );
+  if (verifier !== undefined)
+    await atomic(
+      join(o.evidencePath, "inputs", "verification-manifest.json"),
+      JSON.stringify(verifier, null, 2) + "\n",
+    );
   const s: State = {
     version: 1,
     runId: o.runId,
@@ -468,8 +482,9 @@ export async function validateFrozenInputs(
     ...(s.inputs.prompt ? [s.inputs.prompt] : []),
     ...(s.inputs.recipe ? [s.inputs.recipe] : []),
     ...(s.inputs.profile ? [s.inputs.profile] : []),
-    s.inputs.verifier.entry,
-    ...s.inputs.verifier.dependencies,
+    ...(s.inputs.verifier === undefined
+      ? []
+      : [s.inputs.verifier.entry, ...s.inputs.verifier.dependencies]),
   ];
   for (const f of files) {
     const b = await readFile(join(root, f.path));
@@ -502,7 +517,7 @@ const allowed: Record<Phase, readonly Phase[]> = {
   prepared: ["worker_starting", "failed"],
   worker_starting: ["worker_running", "failed"],
   worker_running: ["worker_finished", "failed"],
-  worker_finished: ["verifying", "worker_starting", "task_blocked", "failed"],
+  worker_finished: ["verifying", "accepted", "worker_starting", "task_blocked", "failed"],
   verifying: ["verified", "worker_starting", "task_blocked", "failed"],
   verified: ["accepted", "worker_starting", "task_blocked", "failed"],
   accepted: [],

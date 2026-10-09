@@ -8,3 +8,6 @@ This project is a small deterministic controller around fresh coding-agent sessi
 - Do not parse model prose as a success contract.
 - Prefer dependency-free Bun and standard library APIs.
 
+
+- Keep the retained `skills/inverno/` skill and shared installed copy synchronized
+  when updating delegation guidance. See the README for their relationship.

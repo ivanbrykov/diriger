@@ -120,6 +120,7 @@ test "$(cat "$SAMOVAR_BENCH_REPO/result.txt")" = correct
     noToolTimeoutMs: 5_000,
     noToolOutputBytes: 100_000,
     maxToolCalls: 100,
+    toolCallCushion: 0,
     maxToolRepetitions: 8,
     runId: "resume-case",
   };

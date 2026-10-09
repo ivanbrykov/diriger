@@ -1,47 +1,113 @@
 # Diriger
 
-Diriger is a deterministic, single-stage controller for bounded coding
-work. It runs one fresh ACP worker at a time against a
+Diriger is a deterministic, manifest-driven controller for bounded coding work.
+One version-2 JSON document describes the repository, evidence directory,
+worker, evaluator, budgets, and an ordered list of stages; a single bounded stage
+is the one-stage case. It runs one fresh ACP worker at a time against a
 caller-provided Git worktree, accepts work only through Git invariants and an
-independent verifier, and records durable evidence outside that worktree.
+independent verifier, and records durable evidence outside that worktree. A
+multi-stage manifest runs sequentially and halts at the first non-accepted stage.
 
 It does not interpret model prose as success, run a daemon, manage a model
 lifecycle, create a worktree, or sandbox tools. Supply a prepared local Git
 worktree and a **new** external evidence directory for each run.
 
+## Inverno delegation skill
+
+[skills/inverno](skills/inverno/SKILL.md) retains the shared caller-side delegation
+skill, including the [decomposition protocol and stage-brief template](skills/inverno/references/decomposition.md).
+The caller owns architecture and stage planning; Qwen implements one prepared stage
+at a time. Diriger's runtime acceptance checks remain separate.
+
+The installed copy is `~/.agents/skills/inverno`; supported agents discover that
+shared location, and Claude may link to it. This repository copy is versioned for
+retention and maintenance, not automatically loaded or installed. Keep the repository
+and installed copies synchronized when changing the skill; review differences before
+copying updates so local changes are preserved. Machine paths and qualification
+notes in its references describe the current personal inverno setup.
+
 ## CLI
 
 The installed command is `diriger`. From a source checkout, use
 `bun src/cli.ts` in its place. Existing evidence and internal ownership lock
-names remain compatible with earlier releases.
+names remain compatible with earlier releases. Every command takes one path:
 
-## Run a stage
-
-The evidence path must not already exist. It receives the frozen inputs,
-state transitions, attempt artifacts, and final summary.
-
-```bash
-diriger run \
-  --repo /absolute/path/to/repository \
-  --plan /absolute/path/to/plan.md \
-  --stage 1 \
-  --verifier /absolute/path/to/verify-stage.sh \
-  --acp-command '["/absolute/path/to/acp-agent", "serve"]' \
-  --evidence /absolute/path/to/new-evidence-directory
+```sh
+diriger run <manifest.json>
+diriger status <evidence-directory> [--json]
+diriger recover <evidence-directory> [--apply] [--json]
+diriger resume <evidence-directory> [--json]
 ```
 
-The worker is any agent speaking ACP over stdio; `--acp-command` is its argv
-as a nonempty JSON array and is required.
+Run configuration lives only in the JSON manifest; `run` takes no flags.
 
-Also accepted: `--prompt`, `--worker-report`, `--max-attempts`,
-`--worker-timeout-seconds`, `--no-tool-timeout-seconds`,
-`--no-tool-output-bytes`, `--max-tool-calls`, `--max-tool-repetitions`, and
-`--run-id`. The verifier runs as `SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
+## Run a manifest
+
+The evidence path must not already exist. Diriger creates it, freezes the
+manifest and every referenced input, and records state transitions, attempt
+artifacts, and per-stage summaries under it.
+
+```json
+{
+  "version": 2,
+  "chain": "example",
+  "repository": "/absolute/path/to/repository",
+  "evidence": "/absolute/path/to/new-evidence-directory",
+  "prompt": "/absolute/path/to/worker.md",
+  "worker": { "command": ["/absolute/path/to/acp-agent", "serve"] },
+  "evaluator": {
+    "command": ["/absolute/path/to/evaluator", "serve"],
+    "timeoutSeconds": 120
+  },
+  "defaults": {
+    "maxAttempts": 2,
+    "workerTimeoutSeconds": 1800,
+    "noToolTimeoutSeconds": 90,
+    "noToolOutputBytes": 262144,
+    "maxToolCalls": 100,
+    "toolCallCushion": 15,
+    "maxToolRepetitions": 8
+  },
+  "stages": [
+    {
+      "id": "s1",
+      "plan": "stages/s1.md",
+      "verifier": "stages/s1.verify.sh",
+      "verifierManifest": "stages/s1.verifier.json",
+      "maxToolCalls": 120
+    }
+  ]
+}
+```
+
+All relative paths resolve against the manifest file. `worker.command` is the
+ACP stdio argv as a nonempty JSON array; `worker.report` is `required` by
+default, or `optional` for a legacy custom prompt. `prompt` defaults to the
+bundled `prompts/worker.md`. `evaluator` is optional and enables the
+between-attempt assessment below. `defaults` sets the budget for every stage;
+a stage may override any budget field. A stage's `after` defaults to the
+previous stage and may only name an earlier one. The verifier runs as
+`SAMOVAR_BENCH_REPO=<repo> <verifier> <stage>`.
+
+A multi-stage manifest runs each stage in order from its predecessor's accepted
+commit; the first non-accepted stage halts the chain and `resume` continues from
+it. Each later stage receives the predecessor's commit SHA and worker report
+through the `previous_stage_commit` and `previous_stage_report_path` prompt
+variables.
+
+## Assessment before retries
+
+An optional `evaluator` object in the manifest runs a fresh assessment after
+failed-attempt cleanup and before another worker is started. A supported distinct
+next approach is required; errors or infrastructure blockers stop for review.
+Acceptance still requires the worker report, Git invariants and independent verifier.
+See [configuration and limits](examples/progress-evaluator/README.md). This
+between-attempt gate does not implement periodic mid-attempt progress evaluation.
 
 ## Worker prompt template
 
 The worker receives a single prompt rendered from a template. The default is
-the bundled `prompts/worker.md`; select another file with `--prompt PATH`.
+the bundled `prompts/worker.md`; name another file with the manifest's `prompt`.
 Templates substitute `{{ name }}` tokens; unknown or leftover tokens are
 errors. The variables are:
 
@@ -56,11 +122,36 @@ errors. The variables are:
   structured outcomes are not required.
 - `worker_judgment`: the worker judgment and structured-report contract, or
   empty when structured outcomes are not required.
+- `previous_stage_commit`: the accepted commit of the predecessor stage, or
+  empty on the first stage.
+- `previous_stage_report_path`: the predecessor's worker report, or empty on the
+  first stage.
 
 Runaway control is deterministic rather than prompt-based: an attempt ends
-with `tool-call-limit` when its ACP tool calls exceed `--max-tool-calls`
+with `tool-call-limit` when its ACP tool calls exceed `defaults.maxToolCalls`
 (default 100) or when the same tool call (kind, title, and input) repeats
-consecutively beyond `--max-tool-repetitions` (default 8).
+consecutively beyond `defaults.maxToolRepetitions` (default 8).
+
+Exceeding `maxToolCalls` first grants one finalize grace instead of an
+immediate kill: the supervisor cancels the in-flight turn and reprompts the
+worker once to only confirm current work, create the required commit, and
+write its report within `toolCallCushion` additional tool calls (default
+15; 0 disables the cushion and restores the immediate kill). Exceeding the
+cushion, or any non-`end_turn` finalize outcome, still fails the attempt
+with `tool-call-limit`; the repetition guard, tool-free watchdog, and worker
+deadline stay active throughout.
+
+## OMP worker profile
+
+[examples/omp](examples/omp/README.md) contains an isolated Oh My Pi 18.2.0 ACP
+profile for a local OpenAI-compatible model. OMP remains an external tool; its Bun
+runtime does not select the target project's runtime or package manager. New
+maintained JavaScript/TypeScript projects use Node.js and pnpm.
+
+A valid ACP `max_tokens` result is classified as `generation-limit`, not a protocol
+violation. It still fails the attempt and cannot bypass the worker report or
+independent verifier. Raising wall time does not change the worker model's output
+limit; set that limit in the worker's pinned model configuration.
 
 ## Worker judgment and structured outcomes
 
@@ -122,7 +213,8 @@ gate, including when a crash interrupts finalization. Existing frozen runs retai
 original reporting policy; do not edit their inputs to change it.
 
 For an existing custom prompt template that does not support the contract,
-explicitly select `--worker-report optional` to retain legacy acceptance. That
+explicitly select `"report": "optional"` in the manifest's `worker` object to
+retain legacy acceptance. That
 mode does not provide the report gate. Custom templates used with required
 reporting must consume the `worker_report_path` and `worker_judgment`
 variables. Programmatic `supervise()` callers opt in with
@@ -132,7 +224,8 @@ existing callers and evidence.
 ## Freeze the verifier closure
 
 By default a verifier is declared self-contained. For a verifier that depends
-on files beside it, supply a manifest. Paths are relative to the manifest; the
+on files beside it, point the stage's `verifierManifest` at a closure manifest.
+Paths are relative to that manifest; the
 snapshot root contains the verifier entry and every dependency.
 
 ```json
@@ -146,10 +239,13 @@ snapshot root contains the verifier entry and every dependency.
 }
 ```
 
-```bash
-diriger run ... \
-  --verifier /absolute/path/to/verification/verify-stage.sh \
-  --verifier-manifest /absolute/path/to/config/verifier-manifest.json
+```json
+{
+  "id": "s1",
+  "plan": "stages/s1.md",
+  "verifier": "verification/verify-stage.sh",
+  "verifierManifest": "config/verifier-manifest.json"
+}
 ```
 
 The controller freezes the resolved configuration, plan, worker prompt
@@ -185,24 +281,25 @@ repair.
 Use the evidence directory to inspect recovery state without starting a worker:
 
 ```bash
-diriger status --evidence /absolute/path/to/evidence --json
-diriger recover --evidence /absolute/path/to/evidence --json
+diriger status /absolute/path/to/evidence --json
+diriger recover /absolute/path/to/evidence --json
 ```
 
 `recover` without `--apply` is a preview. If a controller crashed, use the
 explicit reclamation step only after reviewing the preview:
 
 ```bash
-diriger recover --evidence /absolute/path/to/evidence --apply
-diriger resume --evidence /absolute/path/to/evidence --json
+diriger recover /absolute/path/to/evidence --apply
+diriger resume /absolute/path/to/evidence --json
 ```
 
 `resume` reuses an accepted exact-head proof without rerunning a worker or
 verifier. It can finalize a durable verified proof, rerun a missing verifier at
 the exact candidate, or begin one remaining fresh repair. Terminal evidence
-returns its recorded failed result without launching another worker. A live or
-unsafe stale owner blocks resume; recovery never implicitly takes over an
-ownership claim.
+returns its recorded failed result without launching another worker. Given a
+chain evidence root, `resume` keeps accepted stages and continues from the first
+non-accepted stage. A live or unsafe stale owner blocks resume; recovery never
+implicitly takes over an ownership claim.
 
 Exit codes are consistent across commands:
 
@@ -233,13 +330,15 @@ This requires Linux-style local process and filesystem semantics: `/proc`,
 POSIX process groups, local atomic rename/fsync behavior, Bun, and Git. It is
 not safe for workers that daemonize, escape their process group with `setsid`
 or `setpgid`, or otherwise outlive the controller's group. It also is not a
-multi-stage scheduler or a persistent agent/model service.
+general scheduler or a persistent agent/model service: manifest stages run
+strictly in order with no parallel branches, conditional routing, or
+model-chosen stage selection.
 
 ## Resource limits
 
 Worker wall time and the tool-free generation watchdog are configurable. The
-watchdog requires **both** `--no-tool-timeout-seconds` since the last tool event
-and `--no-tool-output-bytes` generated since that event. For ACP, the byte budget
+watchdog requires **both** `defaults.noToolTimeoutSeconds` since the last tool event
+and `defaults.noToolOutputBytes` generated since that event. For ACP, the byte budget
 counts decoded UTF-8 text in thought/message chunks, excluding JSON framing,
 metadata, and tool output. Splitting the same text into many token-sized frames
 does not consume extra budget.

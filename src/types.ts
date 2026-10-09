@@ -1,8 +1,15 @@
+import type { RetryPolicy } from "./retry.js";
+
 export interface SupervisorConfig {
   readonly repositoryPath: string;
   readonly planPath: string;
   readonly stage: string;
-  readonly verifierPath: string;
+  /**
+   * Acceptance checks. Absent means no automated verification: the stage is
+   * accepted on a clean descendant commit plus the worker report, and the
+   * reviewer judges the result. The definition of done lives in the plan.
+   */
+  readonly verifierPath?: string;
   /** Legacy verifier defaults to self-contained. Declare closure for helpers/oracles. */
   readonly verifierSelfContained?: boolean;
   readonly verifierDependencies?: ReadonlyArray<string>;
@@ -14,13 +21,116 @@ export interface SupervisorConfig {
   readonly acpCommand?: ReadonlyArray<string>;
   /** Runtime settings selected at run creation; supplied by the supervisor only. */
   readonly workerEnvironment?: NodeJS.ProcessEnv;
+  /** Fresh model assessment after failed attempt cleanup; never runs alongside the worker. */
+  readonly progressEvaluator?: {
+    readonly command: ReadonlyArray<string>;
+    readonly timeoutMs: number;
+  };
   readonly maxAttempts: number;
   readonly workerTimeoutMs: number;
   readonly noToolTimeoutMs: number;
   readonly noToolOutputBytes: number;
   readonly maxToolCalls: number;
+  /** One-time finalize-turn tool-call grace after the main budget; 0 disables. */
+  readonly toolCallCushion: number;
   readonly maxToolRepetitions: number;
+  /** Hard/soft retry policy; absent means a single attempt (legacy behavior). */
+  readonly retryPolicy?: RetryPolicy;
+  /** Chain handoff: accepted commit of the predecessor stage; empty when absent. */
+  readonly previousStageCommit?: string;
+  /** Chain handoff: worker report path of the predecessor stage; empty when absent. */
+  readonly previousStageReportPath?: string;
   readonly runId: string;
+}
+
+/** Budget fields a manifest may set in `defaults` or per stage. */
+export interface ManifestBudgets {
+  readonly maxAttempts?: number;
+  readonly workerTimeoutSeconds?: number;
+  readonly maxToolCalls?: number;
+  readonly toolCallCushion?: number;
+  readonly maxToolRepetitions?: number;
+  readonly noToolTimeoutSeconds?: number;
+  readonly noToolOutputBytes?: number;
+}
+
+export interface ManifestStage {
+  readonly id: string;
+  /**
+   * Entry executable: the v3 `checks` entry point, or the legacy v2 verifier.
+   * Absent means the stage declares no automated checks.
+   */
+  readonly verifierPath?: string;
+  /** Legacy v2 verifier closure manifest, when one was declared. */
+  readonly verifierManifestPath?: string;
+  /**
+   * v3: every file under the `checks` path. Frozen and hashed as the closure, so
+   * the reviewed bytes are the tested bytes without a caller-declared schema.
+   */
+  readonly verifierFiles?: ReadonlyArray<string>;
+  /** v3: closure resolved from the `checks` path; absent when self-contained. */
+  readonly verifier?: {
+    readonly selfContained: boolean;
+    readonly dependencies?: ReadonlyArray<string>;
+    readonly snapshotRoot?: string;
+  };
+  /** Absolute path, resolved against the manifest directory. */
+  readonly planPath: string;
+  /** Predecessor stage id; absent on the first stage. */
+  readonly after?: string;
+  /** Per-stage budget overrides. */
+  readonly budgets?: ManifestBudgets;
+}
+
+/**
+ * A complete run specification parsed from one version-2 JSON document. The
+ * same shape describes a single bounded stage and a multi-stage chain; a
+ * one-stage manifest is the trivial case.
+ */
+export interface RunManifest {
+  readonly version: 2 | 3;
+  /** Absolute path of the JSON document; relative paths resolve against it. */
+  readonly manifestPath: string;
+  readonly chainId: string;
+  /** Absolute path of the implementation worktree. */
+  readonly repositoryPath: string;
+  /** Absolute path of this run's fresh evidence directory. */
+  readonly evidencePath: string;
+  readonly promptPath: string;
+  readonly workerCommand: ReadonlyArray<string>;
+  readonly workerReportRequired: boolean;
+  readonly progressEvaluator?: SupervisorConfig["progressEvaluator"];
+  /** Resolved global budget defaults; stages may override per field. */
+  readonly budgets: Required<ManifestBudgets>;
+  /** Resolved hard/soft retry policy applied to every stage. */
+  readonly retries: RetryPolicy;
+  readonly stages: ReadonlyArray<ManifestStage>;
+}
+
+export type ChainStageStatus =
+  | "pending"
+  | "running"
+  | "accepted"
+  | "failed"
+  | "task-blocked";
+
+export interface ChainStageState {
+  readonly id: string;
+  readonly status: ChainStageStatus;
+  readonly commit?: string;
+  readonly runEvidence?: string;
+}
+
+export type ChainOutcome = "running" | "accepted" | "failed" | "task-blocked";
+
+export interface ChainState {
+  readonly version: 1;
+  readonly chainId: string;
+  readonly manifestSha256: string;
+  readonly stages: ReadonlyArray<ChainStageState>;
+  readonly outcome: ChainOutcome;
+  readonly startedAt: string;
+  readonly updatedAt: string;
 }
 
 export type TerminationReason =
@@ -28,6 +138,7 @@ export type TerminationReason =
   | "no-tool-progress"
   | "spawn-error"
   | "protocol-error"
+  | "generation-limit"
   | "permission-denied"
   | "output-limit"
   | "tool-call-limit"
@@ -60,7 +171,24 @@ export interface VerificationResult {
   readonly wrapperExitCode?: number;
 }
 
+export interface ProgressEvaluationRecord {
+  readonly status: "progress" | "extend" | "stuck" | "escalate-infrastructure" | "error";
+  readonly reason?: string;
+  readonly nextHypothesis?: string;
+  readonly evidencePath: string;
+  readonly evaluatedAt: string;
+  readonly retryAllowed: boolean;
+}
+
 export interface AttemptRecord {
+  readonly progressEvaluation?: ProgressEvaluationRecord;
+  /** Which retry tier admitted this attempt, and the budget it ran with. */
+  readonly retry?: {
+    readonly tier: "hard" | "soft";
+    readonly extension: boolean;
+    readonly toolCalls: number;
+    readonly workerTimeoutMs: number;
+  };
   readonly attempt: number;
   readonly startedAt: string;
   readonly finishedAt: string;
@@ -82,6 +210,10 @@ export interface AttemptRecord {
     readonly cleanupComplete: boolean;
     /** ACP tool-call session updates observed before the attempt ended. */
     readonly toolCalls?: number;
+    /** Present when the tool-call cushion granted one finalize turn. */
+    readonly cushionUsed?: true;
+    /** Tool calls observed after the main tool-call budget was exhausted. */
+    readonly finalizeToolCalls?: number;
     /** Present only when ACP ended for excessive tool-free generated text. */
     readonly watchdog?: {
       readonly toolProgressAgeMs: number;
